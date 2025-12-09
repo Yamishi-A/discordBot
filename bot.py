@@ -82,7 +82,7 @@ print("STARTING BOT...")
 for cog in COGS:
     try:
         # NOTE: Cog filenames must match the names in this list (e.g., 'gacha_cog.py')
-        bot.load_extension(cog)
+        await bot.load_extension(cog)
         # The success message is now in the cog's setup function for accuracy
     except Exception as e:
         print(f"Failed to load {cog}: {e}")
@@ -104,4 +104,5 @@ if __name__ == "__main__":
         # Close the connection upon shutdown
         if conn:
             conn.close()
+
             print(f"Closed database connection to {DB_NAME}")
