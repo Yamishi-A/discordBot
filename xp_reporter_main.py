@@ -1,4 +1,4 @@
-# xp_reporter_cog.py (Fixed Activity Keys & Added Setup Function)
+# xp_reporter_main.py
 import discord
 import re
 import math 
@@ -24,15 +24,16 @@ def get_training_tier_data(level):
     elif 21 <= level <= 30:
         return {"base_xp": 200, "tier": 3}
     else:
+        # Default tier for levels outside 1-30 or 0
         return {"base_xp": 100, "tier": 1}
 
 # Activity Multipliers (FIXED: Added common variations for robustness)
 ACTIVITY_MULTIPLIERS = {
     "solo training": 1.0,
     "wholesome training": 2.5,
-    "wholesome roleplay": 2.5,  # <-- Added to handle "roleplay" submissions
+    "wholesome roleplay": 2.5, 
     "battle training": 4.0,
-    "battle roleplay": 4.0,     # <-- Added to handle "roleplay" submissions
+    "battle roleplay": 4.0,     
     "afk farm i": 1.0,
     "afk farm ii": 1.0,
     "afk farm iii": 1.15,
@@ -214,8 +215,7 @@ class XPReporterCog(commands.Cog):
         await message.add_reaction("✅")
 
 
-# --- SETUP FUNCTION (CRITICAL FIX) ---
-# This function is required by discord.py to load the cog from bot.py
+# --- SETUP FUNCTION (Guaranteed to return None) ---
 def setup(bot):
     bot.add_cog(XPReporterCog(bot))
-    print("XP Reporter Cog Loaded")
+    return None
