@@ -1,9 +1,11 @@
-# xp_reporter_main.py
+# xp_reporter_main.py (FINAL VERSION - Rift Tokens & Multipliers Updated + TEMP DEBUG)
 import discord
 import re
 import math 
+import traceback
 from discord.ext import commands
-from bot_config import INPUT_CHANNEL_IDS, OUTPUT_CHANNEL_IDS, SUBMISSION_APPROVER_ROLE_ID 
+# Ensure your bot_config.py has the correct list import: SUBMISSION_APPROVER_ROLE_IDS
+from bot_config import INPUT_CHANNEL_IDS, OUTPUT_CHANNEL_IDS, SUBMISSION_APPROVER_ROLE_IDS 
 
 # --- XP & CROWN SYSTEM CONSTANTS ---
 EMOJI_STR1 = "⭐"
@@ -15,7 +17,10 @@ BASE_CROWNS = 500
 # --- TRAINING TIER DATA ---
 def get_training_tier_data(level):
     """
-    Calculates the base point gain and returns the Training Tier.
+    Calculates the base point gain and returns the Training Tier (TT) number.
+    TT1 (1-10): 100 XP, Tier 1
+    TT2 (11-20): 150 XP, Tier 2
+    TT3 (21-30): 200 XP, Tier 3
     """
     if 1 <= level <= 10:
         return {"base_xp": 100, "tier": 1}
@@ -27,195 +32,200 @@ def get_training_tier_data(level):
         # Default tier for levels outside 1-30 or 0
         return {"base_xp": 100, "tier": 1}
 
-# Activity Multipliers (FIXED: Added common variations for robustness)
+# Activity Multipliers (ONLY activities that will be processed automatically)
 ACTIVITY_MULTIPLIERS = {
+    "troll mission": 1.0,
     "solo training": 1.0,
-    "wholesome training": 2.5,
-    "wholesome roleplay": 2.5, 
-    "battle training": 4.0,
-    "battle roleplay": 4.0,     
     "afk farm i": 1.0,
     "afk farm ii": 1.0,
     "afk farm iii": 1.15,
-    "troll mission": 1.0,
 }
 
-# --- REGEX ---
-REGEX_CHARACTER_NAME = r"\*\*Character Name\(s\):\*\* (.*?)\n"
-REGEX_CHARACTER_LEVEL = r"\*\*Character Level:\*\* (\d+)"
-REGEX_PROGRESSION_TYPE = r"\*\*Type of Progression:\*\* (.*?)\n"
-REGEX_CHANNEL_TO_XP_BOOST = r"\*\*Channel \(s\):\*\* .*?(?=\*\*Boost\(s\) for XP\*\*)"
-REGEX_BOOSTS_XP = r"\*\*Boost\(s\) for XP:\*\* (.*?)\n"
-REGEX_BOOSTS_CROWNS = r"\*\*Boost\(s\) for Crowns:\*\* (.*)"
+# The only activities that will be automatically processed (lower case keys)
+APPROVED_ACTIVITIES = list(ACTIVITY_MULTIPLIERS.keys())
 
 
-def parse_boost_line(boosts_line):
-    """Converts a boost string (e.g., '10%' or '2.5x') into an additive multiplier (e.g., 0.1 or 1.5)."""
-    if boosts_line.lower() == 'n/a' or not boosts_line:
-        return 0.0
-    
-    multiplier_additive = 0.0
-    
-    # 1. Look for percentage (e.g., 10%)
-    percent_match = re.search(r"([\d\.]+)\s*%", boosts_line)
-    if percent_match:
-        try:
-            multiplier_additive = float(percent_match.group(1)) / 100
-        except:
-            pass
-        return multiplier_additive
-
-    # 2. Look for 'x' multiplier (e.g., +2.5x or 2.5x)
-    x_match = re.search(r"(\+?)\s*([\d\.]+)x", boosts_line, re.IGNORECASE)
-    if x_match:
-        try:
-            multiplier_base = float(x_match.group(2))
-            multiplier_additive = multiplier_base - 1.0
-        except:
-            pass
-        return multiplier_additive
-        
-    return 0.0
-
-
+# --- COG CLASS ---
 class XPReporterCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-
-    @commands.Cog.listener()
-    async def on_message(self, message):
-
-        if message.author.bot:
-            return
-
-        if message.channel.id not in INPUT_CHANNEL_IDS:
-            return
-
-        content = message.content
+    
+    # --- Actual Logic to Parse Submission (Multiline Key-Value) ---
+    def _parse_xp_submission(self, message):
+        """
+        Parses the multiline message content for XP submission data.
+        """
+        content = message.content.strip()
         data = {}
         
-        flags = re.IGNORECASE | re.DOTALL
-
-        # --- EXTRACT ALL FIELDS ---
-        name_match = re.search(REGEX_CHARACTER_NAME, content, flags)
-        level_match = re.search(REGEX_CHARACTER_LEVEL, content, flags)
-        prog_match = re.search(REGEX_PROGRESSION_TYPE, content, flags)
-        
-        channel_block_match = re.search(REGEX_CHANNEL_TO_XP_BOOST, content, flags)
-        
-        boosts_xp_match = re.search(REGEX_BOOSTS_XP, content, flags)
-        boosts_crowns_match = re.search(REGEX_BOOSTS_CROWNS, content, flags)
-        
-        # --- Format validation (All required fields must be present) ---
-        if not (name_match and level_match and prog_match and boosts_xp_match and boosts_crowns_match):
-            try:
-                await message.add_reaction("❌")
-            except:
-                pass
-            return
-
-        # Extract data safely
-        data['name'] = name_match.group(1).strip()
-        
         try:
-            data['level'] = int(level_match.group(1))
-        except ValueError:
-            data['level'] = 0
+            # 1. Character Name: Captures everything after the key up to the next newline.
+            name_match = re.search(r"\*\*Character Name\(s\):\*\*(.*?)\n", content, re.IGNORECASE)
+            data['name'] = name_match.group(1).strip() if name_match else None
+            
+            # 2. Character Level: Captures digits
+            level_match = re.search(r"\*\*Character Level:\*\*\s*(\d+)", content, re.IGNORECASE)
+            data['level'] = int(level_match.group(1).strip()) if level_match else None
+            
+            # 3. Progression Type: Captures everything after the key up to the next bold key or end of message.
+            progression_match = re.search(r"\*\*Type of Progression:\*\*(.*?)(?=\*\*|\Z)", content, re.IGNORECASE | re.DOTALL)
+            data['progression'] = progression_match.group(1).strip() if progression_match else None
+            
+            # 4. XP Boost: Captures digits followed by %
+            xp_boost_match = re.search(r"\*\*Boost\(s\) for XP:\*\*\s*(\d+)%", content, re.IGNORECASE)
+            # Store boost as a decimal multiplier (e.g., 10% -> 0.10)
+            data['xp_boost'] = int(xp_boost_match.group(1).strip()) / 100 if xp_boost_match else 0.0
+            
+            # 5. Crowns Boost: Captures digits followed by %
+            crowns_boost_match = re.search(r"\*\*Boost\(s\) for Crowns:\*\*\s*(\d+)%", content, re.IGNORECASE)
+            # Store boost as a decimal multiplier
+            data['crowns_boost'] = int(crowns_boost_match.group(1).strip()) / 100 if crowns_boost_match else 0.0
+            
+            # 6. Final check: Ignore if any crucial field is missing
+            if not all([data['name'], data['level'], data['progression']]):
+                return {'valid': False, 'reason': 'Missing Field'}
+            
+        except Exception:
+            # If any regex or conversion fails (e.g., level isn't a number)
+            return {'valid': False, 'reason': 'Format Error'}
 
-        data['progression'] = prog_match.group(1).strip()
-        
-        boosts_line_xp = boosts_xp_match.group(1).split('\n')[0].strip()
-        boosts_line_crowns = boosts_crowns_match.group(1).split('\n')[0].strip()
-        
-        # --- PARSE SEPARATE BOOSTS ---
-        trait_multiplier_additive_xp = parse_boost_line(boosts_line_xp)
-        trait_multiplier_additive_crowns = parse_boost_line(boosts_line_crowns)
-        
-        # Normalize progression type
-        prog_key = data['progression'].lower().split('[')[0].strip()
-        base_multiplier = ACTIVITY_MULTIPLIERS.get(prog_key, None)
+        data['valid'] = True
+        return data
 
-        # ---------------------------------------------------------------------
-        # FLAG INVALID PROGRESSION TYPE
-        # ---------------------------------------------------------------------
-        if base_multiplier is None:
-            approver_mention = f"<@&{SUBMISSION_APPROVER_ROLE_ID}>"
-            await message.add_reaction("❓")
 
+    # --- Listener for XP Submission ---
+    @commands.Cog.listener()
+    async def on_message(self, message):
+        # 1. Pre-check and Channel check
+        if message.author.bot or message.channel.id not in INPUT_CHANNEL_IDS:
+            return
+        
+        # Only process messages that look like submissions (starts with the character name field)
+        if not message.content.strip().lower().startswith('**character name(s):**'):
+            return 
+
+        data = self._parse_xp_submission(message)
+        
+        # 2. Handle Parsing Failure (Incorrect format)
+        if not data['valid']:
+            await message.add_reaction('❌') # Deny reaction for format error
+            # Send a helpful temporary message to the user in the input channel
             await message.channel.send(
-                f"🚨 **Flagged Submission for Review!** {approver_mention}\n\n"
-                f"Unrecognized activity type: `{data['progression']}` (Submitted by {message.author.mention})\n"
-                f"Please review this submission and apply XP manually."
+                f"{message.author.mention}, your submission failed to parse. Please ensure it exactly matches the expected format, including the bold text and colons.",
+                delete_after=15 # delete after 15 seconds to keep the channel clean
             )
+            print(f"DEBUG: XP submission denied (Format Error) from {message.author.name}")
             return
 
-        # --- XP & CROWN CALCULATION ---
+        # 3. Handle Activity Validation (The user's core requirement)
+        progression_key = data['progression'].lower()
+        
+        if progression_key not in APPROVED_ACTIVITIES:
+            # Deny, ping mods (using the SUBMISSION_APPROVER_ROLE_IDS from bot_config)
+            await message.add_reaction('❌') # Deny reaction for unknown activity
+            
+            mod_pings = " ".join([message.guild.get_role(rid).mention for rid in SUBMISSION_APPROVER_ROLE_IDS if message.guild.get_role(rid)])
+            
+            denial_embed = discord.Embed(
+                title="🚫 Submission Denied - Unknown Activity",
+                description=(
+                    f"{message.author.mention}, the activity **'{data['progression']}'** is not an automatically recognized progression type. "
+                    f"Only the following are automatically graded: {', '.join([a.title() for a in APPROVED_ACTIVITIES])}.\n\n"
+                    f"If this is correct, {mod_pings} need to manually review and approve this submission."
+                ),
+                color=discord.Color.red()
+            )
+            # Send denial message in the input channel for immediate feedback
+            await message.channel.send(embed=denial_embed)
+            print(f"DEBUG: XP submission denied (Unknown Activity: {data['progression']}) from {message.author.name}")
+            return
+            
+        # 4. Process Allowed Activity (Success)
         try:
-            char_level = data['level']
-            tier_data = get_training_tier_data(char_level)
-
-            base_point_gain = tier_data["base_xp"]
-            training_tier = tier_data["tier"]
-
-            total_multiplier_xp = base_multiplier + trait_multiplier_additive_xp
-            total_xp_gain = int(base_point_gain * total_multiplier_xp)
-
-            if total_xp_gain <= 0:
-                await message.add_reaction("⛔")
-                return
+            # --- TIER AND XP CALCULATION ---
+            tier_data = get_training_tier_data(data['level'])
+            training_tier = tier_data['tier']
+            base_point_gain = tier_data['base_xp']
             
-            total_crown_gain = 0
-            if prog_key in ["troll mission"]:
-                total_multiplier_crowns = base_multiplier + trait_multiplier_additive_crowns
-                total_crown_gain = math.ceil(BASE_CROWNS * total_multiplier_crowns)
+            # Get base multiplier for the approved activity
+            base_multiplier = ACTIVITY_MULTIPLIERS.get(progression_key, 1.0) 
             
-        except Exception as e:
-            print(f"XP Calculation Error:", e)
-            await message.add_reaction("⛔")
-            return
+            # Calculate final XP multiplier: Base + (Base * User Boost)
+            xp_boost_percent = data.get('xp_boost', 0.0)
+            total_multiplier = base_multiplier + (base_multiplier * xp_boost_percent)
 
-        # --- NON-XP REWARDS & FINAL MESSAGE ASSEMBLY ---
-        non_xp_gains_list = []
+            # Calculate Gains (XP is rounded down, Crowns is rounded to nearest integer)
+            final_xp_gain = math.floor(base_point_gain * total_multiplier)
+            
+            crowns_boost_percent = data.get('crowns_boost', 0.0)
+            final_crown_gain = int(BASE_CROWNS * (1.0 + crowns_boost_percent))
+            
+            # --- RIFT TOKEN CALCULATION (NEW LOGIC) ---
+            rift_tokens = 0
+            
+            # --- TEMPORARY DEBUGGING PRINTS (START) ---
+            print(f"DEBUG_XP: Progression Key: {progression_key}")
+            print(f"DEBUG_XP: Training Tier: {training_tier}")
+            # --- TEMPORARY DEBUGGING PRINTS (END) ---
 
-        if prog_key in ["troll mission"]:
-            if total_crown_gain > 0:
-                non_xp_gains_list.append(f"{total_crown_gain:,} Crowns")
-            non_xp_gains_list.append(f"{training_tier} Rift Token{'s' if training_tier > 1 else ''}")
-
-        final_gains_line = f"{total_xp_gain:,} XP"
-        if non_xp_gains_list:
+            if progression_key == "troll mission":
+                # Rule: Troll Mission rewards: [Training Tier x 1] Rift Token
+                rift_tokens = training_tier * 1
+            
+            # --- TEMPORARY DEBUGGING PRINT ---
+            print(f"DEBUG_XP: Rift Tokens Calculated: {rift_tokens}")
+            # --- END TEMPORARY DEBUGGING PRINT ---
+            
+            # --- Formatting and Output ---
+            final_gains_line = f"{final_xp_gain} XP"
+            non_xp_gains_list = [f"{final_crown_gain} Crowns"]
+            
+            if rift_tokens > 0:
+                non_xp_gains_list.append(f"{rift_tokens} Rift Tokens") # Add Rift Tokens
+                
             final_gains_line += ", " + ", ".join(non_xp_gains_list)
 
-        # --- OUTPUT CHANNEL DETERMINATION ---
-        try:
-            input_index = INPUT_CHANNEL_IDS.index(message.channel.id)
-            output_channel_id = OUTPUT_CHANNEL_IDS[input_index]
-            output_channel = self.bot.get_channel(output_channel_id)
-        except (ValueError, IndexError):
-            # Fallback if channel ID is not correctly mapped in bot_config
-            output_channel = None 
 
-        # --- SEND FINAL EMBED ---
-        embed = discord.Embed(
-            title=f"✅ Progression Logged: {data['progression'].title()}",
-            description=f"Submitted by {message.author.mention}",
-            color=discord.Color.green()
-        )
-        embed.add_field(name="Character(s)", value=data['name'], inline=True)
-        embed.add_field(name="Level", value=data['level'], inline=True)
-        embed.add_field(name=f"{EMOJI_STR1} Total Gains", value=f"**{final_gains_line}**", inline=False)
-        embed.set_footer(text=f"Base XP: {base_point_gain} | Multiplier: {total_multiplier_xp:.2f}x")
+            # --- OUTPUT CHANNEL DETERMINATION ---
+            try:
+                input_index = INPUT_CHANNEL_IDS.index(message.channel.id)
+                output_channel_id = OUTPUT_CHANNEL_IDS[input_index]
+                output_channel = self.bot.get_channel(output_channel_id)
+            except (ValueError, IndexError):
+                output_channel = None 
 
-        # Send to the determined output channel or the original channel as a fallback
-        if output_channel:
-            await output_channel.send(embed=embed)
-        else:
-            await message.channel.send(embed=embed)
+            # Add reaction for success
+            await message.add_reaction('✅')
 
-        await message.add_reaction("✅")
+            # --- SEND FINAL EMBED ---
+            embed = discord.Embed(
+                title=f"✅ Progression Logged: {data['progression'].title()}",
+                description=f"Submitted by {message.author.mention}", # PINGS SENDER
+                color=discord.Color.green()
+            )
+            embed.add_field(name="Character(s)", value=data['name'], inline=True)
+            embed.add_field(name="Level", value=data['level'], inline=True)
+            embed.add_field(name="Training Tier", value=f"TT{training_tier}", inline=True) # Display TT (New field)
+            embed.add_field(name="Base Multiplier", value=f"{base_multiplier:.2f}x", inline=True)
+            embed.add_field(name="XP Boost", value=f"{xp_boost_percent*100:.0f}%", inline=True)
+            embed.add_field(name="Crowns Boost", value=f"{crowns_boost_percent*100:.0f}%", inline=True)
+            embed.add_field(name=f"{EMOJI_STR1} Total Gains", value=f"**{final_gains_line}**", inline=False)
+            embed.set_footer(text=f"Base XP: {base_point_gain} | Final Multiplier: {total_multiplier:.2f}x")
 
+            print(f"✅ Successfully processed XP submission from {message.author.name}.")
 
-# --- SETUP FUNCTION (Guaranteed to return None) ---
-def setup(bot):
-    bot.add_cog(XPReporterCog(bot))
-    return None
+            if output_channel:
+                await output_channel.send(embed=embed)
+            else:
+                # Fallback to input channel
+                await message.channel.send(embed=embed)
+                
+        except Exception as e:
+            print(f"❌ ERROR PROCESSING XP SUBMISSION: {e}")
+            traceback.print_exc()
+            await message.channel.send(f"❌ An internal error occurred while calculating gains. Mod attention needed. ({message.author.mention})")
+            await message.add_reaction('❓') # Reaction for internal error
+            
+# --- COG SETUP FUNCTION ---
+async def setup(bot):
+    await bot.add_cog(XPReporterCog(bot))
