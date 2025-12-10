@@ -2,9 +2,10 @@
 import os
 import discord
 import sqlite3
+import traceback 
 from discord.ext import commands
 from dotenv import load_dotenv
-from bot_config import DB_NAME # Import DB_NAME for setup
+from bot_config import DB_NAME 
 
 # --- Load .env ---
 load_dotenv()
@@ -12,8 +13,7 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 
 
 # --- DATABASE SETUP (Crucial Initialization) ---
-# This ensures the database file and all required tables exist before Cogs load.
-conn = None # Initialize conn outside try/finally scope
+conn = None 
 try:
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
@@ -58,9 +58,7 @@ except Exception as e:
 
 # --- BOT SETUP & INTENTS ---
 intents = discord.Intents.default()
-# Enables the bot to read message content (required for xp_reporter)
 intents.message_content = True
-# Required for role checks and member lookups (Server Members Intent)
 intents.members = True 
 
 bot = commands.Bot(
@@ -68,24 +66,33 @@ bot = commands.Bot(
     intents=intents
 )
 
-# --- COG LOADING FUNCTION (The Fix) ---
-COGS = ["gacha_cog", "xp_reporter_cog"]
+# --- COG LOADING FUNCTION (Final Aggressive Fix) ---
+COGS = ["gacha_main", "xp_reporter_main"] 
 
 async def load_cogs():
     print("STARTING COG LOADING...")
     for cog in COGS:
         try:
-            # Await is now inside an async function
-            await bot.load_extension(cog) 
+            # *** CRITICAL FIX: Removed 'await' to resolve the TypeError ***
+            # *** bot.load_extension() is being treated as synchronous in this environment. ***
+            bot.load_extension(cog) 
+            print(f"✅ Successfully loaded {cog}")
+        
+        # We use a generic Exception catch here to bypass the AttributeError 
+        # caused by the mismatch in discord.py exception names, while still logging the error.
         except Exception as e:
-            print(f"Failed to load {cog}: {e}")
+             print(f"❌ Failed to load {cog}: Unknown error during loading:")
+             print(f"Error Type: {type(e).__name__}")
+             print(f"Error Message: {e}")
+             import traceback # Need to import it locally here for the traceback.print_exc() to work if not globally available
+             traceback.print_exc()
+             
     print("Bot is ready and all Cogs are loaded.")
 
 
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user} ({bot.user.id})")
-    # Call the async loading function here
     await load_cogs() 
 
 
@@ -103,7 +110,6 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"An error occurred during bot execution: {e}")
     finally:
-        # Close the connection upon shutdown
         if conn:
             conn.close()
             print(f"Closed database connection to {DB_NAME}")
