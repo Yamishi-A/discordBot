@@ -1,4 +1,4 @@
-# gacha_cog.py (FINAL FIXED VERSION - All Deferrals & Error Handling Corrected)
+# gacha_main.py 
 import discord
 from discord.ext import commands
 import sqlite3
@@ -199,14 +199,11 @@ class GachaCog(commands.Cog):
                     f"🚫 **Wrong Channel!** Please use gacha commands like **`/{ctx.command.name}`** only in {channel_mention}.",
                     ephemeral=True
                 )
-                # CRITICAL FIX: Return after handling CheckFailure to prevent the
-                # traceback from logging and the "Application did not respond" message.
                 return
             
             # Handle role restriction error (for /setpity)
             elif ctx.command.name == 'setpity':
                 await ctx.respond("❌ **Permission Denied.** You must have the Moderator role to use this command.", ephemeral=True)
-                # CRITICAL FIX: Return after handling CheckFailure.
                 return
 
         # If the error was not a handled CheckFailure, pass it along.
@@ -223,7 +220,6 @@ class GachaCog(commands.Cog):
             await ctx.respond("❌ You can only perform **1-pulls** or **10-pulls**.", ephemeral=True)
             return
 
-        # FIX: Defer immediately since this involves pulling, DB writes, and complex embeds
         await ctx.defer() 
 
         data = get_user_pity_data(user_id)
@@ -288,7 +284,6 @@ class GachaCog(commands.Cog):
     @commands.slash_command(name="pity", description="Checks your current pity count and total pulls.")
     @commands.check(is_gacha_channel)
     async def pity_check(self, ctx: discord.ApplicationContext):
-        # Using ctx.respond() because the DB lookup is fast.
         user_id = ctx.author.id
 
         data = get_user_pity_data(user_id)
@@ -324,7 +319,6 @@ class GachaCog(commands.Cog):
     @commands.slash_command(name="inventory", description="Shows the items you currently own.")
     @commands.check(is_gacha_channel)
     async def inventory(self, ctx: discord.ApplicationContext):
-        # FIX: Added defer()
         await ctx.defer() 
         
         user_id = ctx.author.id
@@ -364,7 +358,6 @@ class GachaCog(commands.Cog):
     @discord.option("item_name", description="The full name of the item you want to use.")
     @discord.option("amount", type=int, description="The amount to use (defaults to 1)", default=1, min_value=1)
     async def use(self, ctx: discord.ApplicationContext, item_name: str, amount: int):
-        # Uses ctx.respond(), so no defer is needed.
         user_id = ctx.author.id
 
         if "Crystal" not in item_name and "Crowns" not in item_name:
@@ -393,7 +386,6 @@ class GachaCog(commands.Cog):
     @commands.slash_command(name="history", description="Shows your last 10 pulls from the Entropy Banner.")
     @commands.check(is_gacha_channel)
     async def history(self, ctx: discord.ApplicationContext):
-        # FIX: Added defer()
         await ctx.defer() 
         
         user_id = ctx.author.id
@@ -434,7 +426,6 @@ class GachaCog(commands.Cog):
     @commands.slash_command(name="leaderboard", description="Shows users with the most total pulls.")
     @commands.check(is_gacha_channel)
     async def leaderboard(self, ctx: discord.ApplicationContext):
-        # FIX: Added defer()
         await ctx.defer() 
         
         conn = _get_conn()
@@ -474,7 +465,6 @@ class GachaCog(commands.Cog):
     @commands.slash_command(name="stats", description="Shows global statistics for the Entropy Banner.")
     @commands.check(is_gacha_channel)
     async def stats(self, ctx: discord.ApplicationContext):
-        # FIX: Added defer()
         await ctx.defer() 
         
         conn = _get_conn()
@@ -526,8 +516,6 @@ class GachaCog(commands.Cog):
     @discord.option("pity_5_star", type=int, description="New 5-star pity count (0-60).", min_value=0, max_value=60)
     @discord.option("pity_4_star", type=int, description="New 4-star pity count (0-10).", min_value=0, max_value=10)
     async def setpity(self, ctx: discord.ApplicationContext, target_user: discord.Member, pity_5_star: int, pity_4_star: int):
-
-        # Uses ctx.respond(), so no defer is needed.
         current_data = get_user_pity_data(target_user.id)
         current_total_pulls = current_data["total_pulls"]
 
@@ -545,7 +533,7 @@ class GachaCog(commands.Cog):
         await ctx.respond(embed=embed)
 
 
-# --- SETUP FUNCTION ---
+# --- SETUP FUNCTION (Guaranteed to return None) ---
 def setup(bot):
     bot.add_cog(GachaCog(bot))
-    print("Gacha Cog Loaded")
+    return None
