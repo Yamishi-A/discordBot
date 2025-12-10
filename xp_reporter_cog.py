@@ -1,4 +1,4 @@
-# xp_reporter_cog.py (Fixed Activity Keys)
+# xp_reporter_cog.py (Fixed Activity Keys & Added Setup Function)
 import discord
 import re
 import math 
@@ -32,7 +32,7 @@ ACTIVITY_MULTIPLIERS = {
     "wholesome training": 2.5,
     "wholesome roleplay": 2.5,  # <-- Added to handle "roleplay" submissions
     "battle training": 4.0,
-    "battle roleplay": 4.0,    # <-- Added to handle "roleplay" submissions
+    "battle roleplay": 4.0,     # <-- Added to handle "roleplay" submissions
     "afk farm i": 1.0,
     "afk farm ii": 1.0,
     "afk farm iii": 1.15,
@@ -191,22 +191,31 @@ class XPReporterCog(commands.Cog):
             output_channel_id = OUTPUT_CHANNEL_IDS[input_index]
             output_channel = self.bot.get_channel(output_channel_id)
         except (ValueError, IndexError):
+            # Fallback if channel ID is not correctly mapped in bot_config
             output_channel = None 
 
+        # --- SEND FINAL EMBED ---
+        embed = discord.Embed(
+            title=f"✅ Progression Logged: {data['progression'].title()}",
+            description=f"Submitted by {message.author.mention}",
+            color=discord.Color.green()
+        )
+        embed.add_field(name="Character(s)", value=data['name'], inline=True)
+        embed.add_field(name="Level", value=data['level'], inline=True)
+        embed.add_field(name=f"{EMOJI_STR1} Total Gains", value=f"**{final_gains_line}**", inline=False)
+        embed.set_footer(text=f"Base XP: {base_point_gain} | Multiplier: {total_multiplier_xp:.2f}x")
+
+        # Send to the determined output channel or the original channel as a fallback
         if output_channel:
-            
-            approved_message = f"""
-{EMOJI_STR1} **Character Name(s):** {data['name']}
-{EMOJI_STR2} **Type of Progression:** {data['progression']}
-{EMOJI_STR3} **Gains:** {final_gains_line}
-            """
-
-            await output_channel.send(approved_message)
-            await message.add_reaction("✅")
+            await output_channel.send(embed=embed)
         else:
-            print(f"[ERROR] Output channel not found or misconfigured for input channel ID: {message.channel.id}.")
+            await message.channel.send(embed=embed)
+
+        await message.add_reaction("✅")
 
 
+# --- SETUP FUNCTION (CRITICAL FIX) ---
+# This function is required by discord.py to load the cog from bot.py
 def setup(bot):
     bot.add_cog(XPReporterCog(bot))
     print("XP Reporter Cog Loaded")
