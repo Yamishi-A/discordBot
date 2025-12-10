@@ -68,24 +68,26 @@ bot = commands.Bot(
     intents=intents
 )
 
+# --- COG LOADING FUNCTION (The Fix) ---
+COGS = ["gacha_cog", "xp_reporter_cog"]
+
+async def load_cogs():
+    print("STARTING COG LOADING...")
+    for cog in COGS:
+        try:
+            # Await is now inside an async function
+            await bot.load_extension(cog) 
+        except Exception as e:
+            print(f"Failed to load {cog}: {e}")
+    print("Bot is ready and all Cogs are loaded.")
+
+
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user} ({bot.user.id})")
-    print("Bot is ready and Cogs are loaded.")
+    # Call the async loading function here
+    await load_cogs() 
 
-
-# --- COG LOADING ---
-COGS = ["gacha_cog", "xp_reporter_cog"]
-
-print("STARTING BOT...")
-
-for cog in COGS:
-    try:
-        # NOTE: Cog filenames must match the names in this list (e.g., 'gacha_cog.py')
-        await bot.load_extension(cog)
-        # The success message is now in the cog's setup function for accuracy
-    except Exception as e:
-        print(f"Failed to load {cog}: {e}")
 
 # --- RUN BOT ---
 if __name__ == "__main__":
@@ -104,5 +106,4 @@ if __name__ == "__main__":
         # Close the connection upon shutdown
         if conn:
             conn.close()
-
             print(f"Closed database connection to {DB_NAME}")
