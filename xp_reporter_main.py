@@ -14,7 +14,7 @@ EMOJI_STR3 = "✨"
 
 BASE_CROWNS = 500
 
-# --- TRAINING TIER DATA ---
+# --- TRAINING TIER DATA (UNCHANGED) ---
 def get_training_tier_data(level):
     """
     Calculates the base point gain and returns the Training Tier (TT) number.
@@ -50,7 +50,7 @@ class XPReporterCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
     
-    # --- Actual Logic to Parse Submission (Multiline Key-Value) ---
+    # --- Actual Logic to Parse Submission (Multiline Key-Value) (UNCHANGED) ---
     def _parse_xp_submission(self, message):
         """
         Parses the multiline message content for XP submission data.
@@ -154,11 +154,18 @@ class XPReporterCog(commands.Cog):
             xp_boost_percent = data.get('xp_boost', 0.0)
             total_multiplier = base_multiplier + (base_multiplier * xp_boost_percent)
 
-            # Calculate Gains (XP is rounded down, Crowns is rounded to nearest integer)
+            # Calculate Gains (XP is rounded down)
             final_xp_gain = math.floor(base_point_gain * total_multiplier)
             
+            # --- CROWN CALCULATION (MODIFIED HERE) ---
             crowns_boost_percent = data.get('crowns_boost', 0.0)
-            final_crown_gain = int(BASE_CROWNS * (1.0 + crowns_boost_percent))
+            base_crown_reward = 0 # Default to 0 crowns
+            
+            if progression_key == "troll mission":
+                base_crown_reward = BASE_CROWNS # Only Troll Missions give the base crown reward
+
+            # Calculate final crowns based on the activity's base reward and user boost
+            final_crown_gain = int(base_crown_reward * (1.0 + crowns_boost_percent))
             
             # --- RIFT TOKEN CALCULATION (NEW LOGIC) ---
             rift_tokens = 0
@@ -178,12 +185,17 @@ class XPReporterCog(commands.Cog):
             
             # --- Formatting and Output ---
             final_gains_line = f"{final_xp_gain} XP"
-            non_xp_gains_list = [f"{final_crown_gain} Crowns"]
+            non_xp_gains_list = []
             
+            # Only include crowns in the list if they are greater than 0
+            if final_crown_gain > 0:
+                non_xp_gains_list.append(f"{final_crown_gain} Crowns")
+
             if rift_tokens > 0:
                 non_xp_gains_list.append(f"{rift_tokens} Rift Tokens") # Add Rift Tokens
                 
-            final_gains_line += ", " + ", ".join(non_xp_gains_list)
+            if non_xp_gains_list:
+                final_gains_line += ", " + ", ".join(non_xp_gains_list)
 
 
             # --- OUTPUT CHANNEL DETERMINATION ---
