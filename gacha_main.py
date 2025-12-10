@@ -6,6 +6,7 @@ import random
 import time
 from discord import app_commands
 
+# Assuming bot_config is available and defined elsewhere
 from bot_config import GACHA_CHANNEL_ID, MODERATOR_ROLE_IDS, DB_NAME 
 
 # --- LOOT POOLS & CONSTANTS ---
@@ -33,7 +34,20 @@ LOOT_TABLE = {
     ]
 }
 
-# --- DATABASE HELPERS (Functionality unchanged, logic uses 'pity_5_star' as main counter) ---
+# Mapping rarity to a color for the embed
+RARITY_COLORS = {
+    5: 0xFFD700, # Gold
+    4: 0xADD8E6, # Light Blue
+    3: 0x90EE90, # Light Green
+}
+
+RARITY_EMOJI = {
+    5: "🌟",
+    4: "🔸",
+    3: "▪️",
+}
+
+# --- DATABASE HELPERS ---
 def _get_conn():
     return sqlite3.connect(DB_NAME)
 
@@ -41,7 +55,6 @@ def get_user_pity_data(user_id):
     conn = _get_conn()
     try:
         c = conn.cursor()
-        # 'pity_5_star' column is used as the single main pity counter since last 5-star
         c.execute("SELECT * FROM pity WHERE user_id = ?", (user_id,))
         data = c.fetchone()
         if data:
@@ -93,8 +106,30 @@ def log_pull_history(user_id, item_name, rarity):
     finally:
         conn.close()
 
+# --- NEW: Retrieve Inventory Data ---
+def get_user_inventory(user_id):
+    conn = _get_conn()
+    try:
+        c = conn.cursor()
+        # Fetch all items and their quantities for the user
+        c.execute("SELECT item_name, quantity FROM inventory WHERE user_id = ? ORDER BY quantity DESC, item_name ASC", (user_id,))
+        return c.fetchall() # Returns a list of (item_name, quantity) tuples
+    finally:
+        conn.close()
 
-# --- CORE GACHA PULL LOGIC (REWRITTEN) ---
+# --- NEW: Retrieve Pull History Data ---
+def get_user_history(user_id, limit=10):
+    conn = _get_conn()
+    try:
+        c = conn.cursor()
+        # Fetch recent pull history, limited to `limit`
+        c.execute("SELECT item_name, rarity, timestamp FROM pull_history WHERE user_id = ? ORDER BY timestamp DESC LIMIT ?", (user_id, limit))
+        return c.fetchall() # Returns a list of (item_name, rarity, timestamp) tuples
+    finally:
+        conn.close()
+
+
+# --- CORE GACHA PULL LOGIC (UNCHANGED) ---
 
 def pull_gacha_single(user_id, pity_data):
     # Use pity_5_star as the single main pity counter since last 5-star
@@ -144,15 +179,39 @@ def pull_gacha_single(user_id, pity_data):
 
 # --- UTILITY (Kept as is) ---
 def is_gacha_channel_interaction(interaction: discord.Interaction):
+    # Assuming GACHA_CHANNEL_ID is a single ID
     return interaction.channel_id == GACHA_CHANNEL_ID
 
 def is_gacha_channel_context(ctx: commands.Context):
+    # Assuming GACHA_CHANNEL_ID is a single ID
     return ctx.channel.id == GACHA_CHANNEL_ID
 
+# --- EMBED FORMATTER FUNCTIONS ---
 
-# --- WISH PROCESSOR (Slash Command) ---
+# Helper to format the list of items from the wish
+def format_item_list_for_embed(results):
+    description = []
+    
+    # 5-Star Items
+    if results[5]:
+        description.append("### 🌟 5-STAR ITEM(S) 🌟")
+        description.extend(f"**{RARITY_EMOJI[5]} {item}**" for item in results[5])
+        
+    # 4-Star Items
+    if results[4]:
+        description.append("\n### 🔸 4-STAR ITEM(S) 🔸")
+        description.extend(f"*{RARITY_EMOJI[4]} {item}*" for item in results[4])
+
+    # 3-Star Items
+    if results[3]:
+        # Only show a brief summary of 3-star items to save space
+        count_3_star = len(results[3])
+        description.append(f"\n**{RARITY_EMOJI[3]} {count_3_star} x 3-Star Item(s)**")
+        
+    return "\n".join(description)
+
+# --- WISH PROCESSOR (Slash Command - Now Uses Embed) ---
 async def _process_wish(interaction: discord.Interaction, amount: int):
-    # Defer the response for a long task
     await interaction.response.defer()
     
     user_id = interaction.user.id
@@ -165,58 +224,40 @@ async def _process_wish(interaction: discord.Interaction, amount: int):
         
         results[rarity].append(item_name)
         
-        # 2. Database writes (Update pity, inventory, and history)
+        # 2. Database writes
         add_item_to_inventory(user_id, item_name)
         log_pull_history(user_id, item_name, rarity)
         
-    # 3. Update Pity Data (one final write)
+    # 3. Update Pity Data
     update_pity_data(user_id, pity_data["pity_5_star"], pity_data["pity_4_star"], pity_data["total_pulls"])
     
-    # 4. Format and send results
-    def format_item_list(items, rarity):
-        if not items:
-            return ""
-        if rarity == 5:
-            return "\n".join(f"**🌟 {item}**" for item in items)
-        if rarity == 4:
-            return "\n".join(f"🔸 *{item}*" for item in items)
-        if rarity == 3:
-            return "\n".join(f"▪️ {item}" for item in items)
-
-    output = [f"**{interaction.user.mention}'s {amount} Wish Results**:\n"]
+    # 4. Format and send results in an Embed
+    embed = discord.Embed(
+        title=f"💫 {interaction.user.display_name}'s {amount} Wish Results",
+        description=format_item_list_for_embed(results),
+        color=RARITY_COLORS.get(max(results.keys()), discord.Color.green()) if any(results.values()) else discord.Color.dark_grey(),
+        # Removed timestamp=datetime.now(timezone.utc)
+    )
     
-    if results[5]:
-        output.append("### 🌟 5-STAR ITEM(S) 🌟")
-        output.append(format_item_list(results[5], 5))
-        
-    if results[4]:
-        output.append("\n### 🔸 4-STAR ITEM(S) 🔸")
-        output.append(format_item_list(results[4], 4))
-
-    if results[3]:
-        output.append("\n**3-Star Item(s):**")
-        output.append(format_item_list(results[3], 3))
-
-    # Updated Pity Display to reflect the new 60-pull hard pity
-    footer = (
-        f"\n---\n"
-        f"Pulls until Guaranteed 5-Star: **{PITY_5_STAR_HARD - pity_data['pity_5_star']}** "
+    # Pity Footer
+    pity_footer = (
+        f"Pulls until Guaranteed 5-Star: {PITY_5_STAR_HARD - pity_data['pity_5_star']} "
         f"({pity_data['pity_5_star']}/{PITY_5_STAR_HARD})"
     )
-    output.append(footer)
+    embed.set_footer(text=pity_footer)
+    embed.set_thumbnail(url=interaction.user.avatar.url if interaction.user.avatar else None)
     
-    # Use follow-up since the response was deferred
-    await interaction.followup.send("\n".join(output))
+    await interaction.followup.send(embed=embed)
 
 
-# --- WISH PROCESSOR (Text Command) ---
+# --- WISH PROCESSOR (Text Command - Now Uses Embed) ---
 async def _text_process_wish(ctx: commands.Context, amount: int):
     user_id = ctx.author.id
     pity_data = get_user_pity_data(user_id)
     results = {5: [], 4: [], 3: []}
     
     # 1. Perform Gacha Pulls
-    async with ctx.typing(): # Show that the bot is "typing" during the calculation
+    async with ctx.typing():
         for _ in range(amount):
             rarity, item_name, pity_data = pull_gacha_single(user_id, pity_data)
             
@@ -229,75 +270,224 @@ async def _text_process_wish(ctx: commands.Context, amount: int):
         # 3. Update Pity Data
         update_pity_data(user_id, pity_data["pity_5_star"], pity_data["pity_4_star"], pity_data["total_pulls"])
     
-    # 4. Format and send results
-    def format_item_list(items, rarity):
-        if not items:
-            return ""
-        if rarity == 5:
-            return "\n".join(f"**🌟 {item}**" for item in items)
-        if rarity == 4:
-            return "\n".join(f"🔸 *{item}*" for item in items)
-        if rarity == 3:
-            return "\n".join(f"▪️ {item}" for item in items)
-
-    output = [f"**{ctx.author.mention}'s {amount} Wish Results**:\n"]
+    # 4. Format and send results in an Embed
+    embed = discord.Embed(
+        title=f"💫 {ctx.author.display_name}'s {amount} Wish Results",
+        description=format_item_list_for_embed(results),
+        color=RARITY_COLORS.get(max(results.keys()), discord.Color.green()) if any(results.values()) else discord.Color.dark_grey(),
+        # Removed timestamp
+    )
     
-    if results[5]:
-        output.append("### 🌟 5-STAR ITEM(S) 🌟")
-        output.append(format_item_list(results[5], 5))
-        
-    if results[4]:
-        output.append("\n### 🔸 4-STAR ITEM(S) 🔸")
-        output.append(format_item_list(results[4], 4))
-
-    if results[3]:
-        output.append("\n**3-Star Item(s):**")
-        output.append(format_item_list(results[3], 3))
-
-    # Updated Pity Display to reflect the new 60-pull hard pity
-    footer = (
-        f"\n---\n"
-        f"Pulls until Guaranteed 5-Star: **{PITY_5_STAR_HARD - pity_data['pity_5_star']}** "
+    # Pity Footer
+    pity_footer = (
+        f"Pulls until Guaranteed 5-Star: {PITY_5_STAR_HARD - pity_data['pity_5_star']} "
         f"({pity_data['pity_5_star']}/{PITY_5_STAR_HARD})"
     )
-    output.append(footer)
+    embed.set_footer(text=pity_footer)
+    embed.set_thumbnail(url=ctx.author.avatar.url if ctx.author.avatar else None)
     
-    await ctx.send("\n".join(output))
+    await ctx.send(embed=embed)
 
 
-# --- Placeholder functions (for non-wish commands) ---
-
+# --- INVENTORY PROCESSOR (Functional with Embed) ---
 async def _process_inventory(interaction: discord.Interaction):
-    await interaction.response.send_message(f"Showing inventory for {interaction.user.mention} (Placeholder).", ephemeral=True)
+    await interaction.response.defer(ephemeral=True) 
+    user_id = interaction.user.id
+    inventory_items = get_user_inventory(user_id)
+    
+    embed = discord.Embed(
+        title=f"🎒 {interaction.user.display_name}'s Inventory",
+        color=discord.Color.blue(),
+    )
+    embed.set_thumbnail(url=interaction.user.avatar.url if interaction.user.avatar else None)
 
-async def _process_use(interaction: discord.Interaction, item: str):
-    await interaction.response.send_message(f"Using item: {item} (Placeholder).", ephemeral=True)
+    if not inventory_items:
+        embed.description = "Your inventory is empty! Use **/wish** to get some items."
+    else:
+        inventory_text = ""
+        for item_name, quantity in inventory_items:
+            rarity_emoji = "📦"
+            for r, items in LOOT_TABLE.items():
+                if item_name in items:
+                    rarity_emoji = RARITY_EMOJI.get(r, "📦")
+                    break
+            
+            line = f"{rarity_emoji} **{item_name}** x{quantity}\n"
+            if len(inventory_text) + len(line) > 1024: 
+                break 
+            inventory_text += line
+            
+        embed.add_field(name="Item Name (Quantity)", value=inventory_text, inline=False)
+        embed.set_footer(text=f"Total unique items: {len(inventory_items)}")
+    
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
+
+# --- HISTORY PROCESSOR (Functional with Embed) ---
 async def _process_history(interaction: discord.Interaction):
-    await interaction.response.send_message(f"Showing pull history for {interaction.user.mention} (Placeholder).", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+    user_id = interaction.user.id
+    history_items = get_user_history(user_id, limit=20)
+    
+    embed = discord.Embed(
+        title=f"📜 {interaction.user.display_name}'s Recent Pull History",
+        color=discord.Color.purple(),
+    )
+    embed.set_thumbnail(url=interaction.user.avatar.url if interaction.user.avatar else None)
+
+    if not history_items:
+        embed.description = "You haven't made any wishes yet! Use **/wish** to start."
+    else:
+        history_text = ""
+        for item_name, rarity, timestamp in history_items:
+            # Use Discord's relative timestamp format
+            rarity_emoji = RARITY_EMOJI.get(rarity, "❓")
+            
+            line = f"{rarity_emoji} **{item_name}** (<t:{timestamp}:R>)\n"
+            if len(history_text) + len(line) > 1024:
+                break
+            history_text += line
+            
+        embed.add_field(name="Item Name (Time Pulled)", value=history_text, inline=False)
+        embed.set_footer(text=f"Showing {len(history_items)} most recent pulls.")
+    
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+# --- PITY PROCESSOR (Functional with Embed) ---
+async def _process_pity(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    user_id = interaction.user.id
+    pity_data = get_user_pity_data(user_id)
+    
+    current_pity = pity_data['pity_5_star']
+    pulls_to_guarantee = PITY_5_STAR_HARD - current_pity
+    
+    embed = discord.Embed(
+        title=f"📊 {interaction.user.display_name}'s Pity Status",
+        color=discord.Color.gold(),
+    )
+    embed.set_thumbnail(url=interaction.user.avatar.url if interaction.user.avatar else None)
+    
+    # Pity Field
+    embed.add_field(
+        name="🌟 5-Star Pity Counter", 
+        value=f"You are **{current_pity}** pulls into the 5-star guarantee cycle.", 
+        inline=False
+    )
+    
+    # Guarantee Field
+    guarantee_value = f"**{pulls_to_guarantee}** pulls remaining for a guaranteed 5-Star item."
+    if current_pity == 0:
+        guarantee_value = "Your last pull was a 5-Star, or you've just started! **60** pulls to go."
+    elif pulls_to_guarantee <= 10 and pulls_to_guarantee > 0:
+        guarantee_value = f"🚨 **{pulls_to_guarantee}** pulls remaining! You are close to the hard pity!"
+
+    embed.add_field(
+        name="Pull to Guarantee", 
+        value=guarantee_value, 
+        inline=False
+    )
+    
+    # Total Pulls Field
+    embed.add_field(
+        name="Total Lifetime Pulls", 
+        value=f"You have made a total of **{pity_data['total_pulls']}** wishes.", 
+        inline=True
+    )
+
+    embed.set_footer(text=f"Hard Pity is at {PITY_5_STAR_HARD} pulls.")
+    
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+# --- Placeholder functions (Updated to point to functional processors) ---
+async def _process_use(interaction: discord.Interaction, item: str):
+    await interaction.response.send_message(f"Using item: **{item}** (Placeholder: Logic to consume item and apply effect).", ephemeral=True)
 
 async def _process_leaderboard(interaction: discord.Interaction):
-    await interaction.response.send_message(f"Showing pull leaderboard (Placeholder).", ephemeral=True)
+    await interaction.response.send_message(f"Showing pull leaderboard (Placeholder: Requires global data retrieval).", ephemeral=True)
 
 async def _process_stats(interaction: discord.Interaction):
-    await interaction.response.send_message(f"Showing stats for {interaction.user.mention} (Placeholder).", ephemeral=True)
+    # Stats is similar to pity, show pity as the main stat
+    await _process_pity(interaction) 
 
 
-# --- TEXT COMMAND PLACEHOLDERS ---
+# --- TEXT COMMAND PLACEHOLDERS (Updated to use functional processes) ---
 async def _text_process_inventory(ctx: commands.Context):
-    await ctx.send(f"Showing inventory for {ctx.author.mention} (Placeholder - TEXT).")
+    user_id = ctx.author.id
+    inventory_items = get_user_inventory(user_id)
+    
+    embed = discord.Embed(
+        title=f"🎒 {ctx.author.display_name}'s Inventory",
+        color=discord.Color.blue(),
+    )
+    
+    if not inventory_items:
+        embed.description = "Your inventory is empty! Use `!wish` to get some items."
+    else:
+        inventory_text = "\n".join(f"**{item_name}** x{quantity}" for item_name, quantity in inventory_items[:15])
+        embed.add_field(name="Item Name (Quantity)", value=inventory_text, inline=False)
+        
+    await ctx.send(embed=embed)
 
 async def _text_process_use(ctx: commands.Context, item: str):
-    await ctx.send(f"Using item: {item} (Placeholder - TEXT).")
+    await ctx.send(f"Using item: **{item}** (Placeholder: Logic to consume item and apply effect).")
 
 async def _text_process_history(ctx: commands.Context):
-    await ctx.send(f"Showing pull history for {ctx.author.mention} (Placeholder - TEXT).")
+    user_id = ctx.author.id
+    history_items = get_user_history(user_id, limit=10)
+
+    embed = discord.Embed(
+        title=f"📜 {ctx.author.display_name}'s Recent Pull History",
+        color=discord.Color.purple(),
+    )
+
+    if not history_items:
+        embed.description = "You haven't made any wishes yet! Use `!wish` to start."
+    else:
+        history_text = ""
+        for item_name, rarity, timestamp in history_items:
+            rarity_emoji = RARITY_EMOJI.get(rarity, "❓")
+            line = f"{rarity_emoji} **{item_name}** (<t:{timestamp}:R>)\n"
+            history_text += line
+        embed.add_field(name="Item Name (Time Pulled)", value=history_text, inline=False)
+        
+    await ctx.send(embed=embed)
 
 async def _text_process_leaderboard(ctx: commands.Context):
     await ctx.send(f"Showing pull leaderboard (Placeholder - TEXT).")
 
 async def _text_process_stats(ctx: commands.Context):
-    await ctx.send(f"Showing stats for {ctx.author.mention} (Placeholder - TEXT).")
+    # This serves as the text command for both !pity and !stats
+    user_id = ctx.author.id
+    pity_data = get_user_pity_data(user_id)
+    
+    current_pity = pity_data['pity_5_star']
+    pulls_to_guarantee = PITY_5_STAR_HARD - current_pity
+    
+    embed = discord.Embed(
+        title=f"📊 {ctx.author.display_name}'s Pity Status/Stats",
+        color=discord.Color.gold(),
+    )
+    
+    embed.add_field(
+        name="🌟 5-Star Pity Counter", 
+        value=f"**{current_pity} / {PITY_5_STAR_HARD}** pulls into the guarantee cycle.", 
+        inline=False
+    )
+    embed.add_field(
+        name="Pulls to Guarantee", 
+        value=f"**{pulls_to_guarantee}** pulls remaining.", 
+        inline=True
+    )
+    embed.add_field(
+        name="Total Lifetime Pulls", 
+        value=f"**{pity_data['total_pulls']}** wishes made.", 
+        inline=True
+    )
+    
+    await ctx.send(embed=embed)
 
 
 # --- COG CLASS (Commands) ---
@@ -307,44 +497,55 @@ class GachaCog(commands.Cog):
 
     # SLASH COMMANDS
     @app_commands.command(name="wish", description="Perform gacha pulls (1 or 10)")
-    async def slash_wish(self, interaction: discord.Interaction, amount: int = 1):
+    @app_commands.describe(amount="The number of wishes to perform (1 or 10).")
+    async def slash_wish(self, interaction: discord.Interaction, amount: app_commands.Range[int, 1, 10] = 1):
         if not is_gacha_channel_interaction(interaction):
-            await interaction.response.send_message("🚫 Wrong channel.", ephemeral=True)
+            await interaction.response.send_message("🚫 Wrong channel. Please use the designated gacha channel.", ephemeral=True)
             return
-        await _process_wish(interaction, amount) # Now calls the full logic
+        if amount not in [1, 10]:
+            await interaction.response.send_message("🚫 You can only wish 1 or 10 times at once.", ephemeral=True)
+            return
+        await _process_wish(interaction, amount)
 
     @app_commands.command(name="inventory", description="View your inventory")
     async def slash_inventory(self, interaction: discord.Interaction):
         if not is_gacha_channel_interaction(interaction):
-            await interaction.response.send_message("🚫 Wrong channel.", ephemeral=True)
+            await interaction.response.send_message("🚫 Wrong channel. Please use the designated gacha channel.", ephemeral=True)
             return
         await _process_inventory(interaction)
 
     @app_commands.command(name="use", description="Use an item from your inventory")
     async def slash_use(self, interaction: discord.Interaction, item: str):
         if not is_gacha_channel_interaction(interaction):
-            await interaction.response.send_message("🚫 Wrong channel.", ephemeral=True)
+            await interaction.response.send_message("🚫 Wrong channel. Please use the designated gacha channel.", ephemeral=True)
             return
         await _process_use(interaction, item)
 
     @app_commands.command(name="history", description="View your recent pull history")
     async def slash_history(self, interaction: discord.Interaction):
         if not is_gacha_channel_interaction(interaction):
-            await interaction.response.send_message("🚫 Wrong channel.", ephemeral=True)
+            await interaction.response.send_message("🚫 Wrong channel. Please use the designated gacha channel.", ephemeral=True)
             return
         await _process_history(interaction)
 
+    @app_commands.command(name="pity", description="View your current 5-star pity status")
+    async def slash_pity(self, interaction: discord.Interaction):
+        if not is_gacha_channel_interaction(interaction):
+            await interaction.response.send_message("🚫 Wrong channel. Please use the designated gacha channel.", ephemeral=True)
+            return
+        await _process_pity(interaction)
+        
     @app_commands.command(name="leaderboard", description="View the pull leaderboard")
     async def slash_leaderboard(self, interaction: discord.Interaction):
         if not is_gacha_channel_interaction(interaction):
-            await interaction.response.send_message("🚫 Wrong channel.", ephemeral=True)
+            await interaction.response.send_message("🚫 Wrong channel. Please use the designated gacha channel.", ephemeral=True)
             return
         await _process_leaderboard(interaction)
 
-    @app_commands.command(name="stats", description="View your gacha stats")
+    @app_commands.command(name="stats", description="View your gacha stats (e.g., total pulls, pity)")
     async def slash_stats(self, interaction: discord.Interaction):
         if not is_gacha_channel_interaction(interaction):
-            await interaction.response.send_message("🚫 Wrong channel.", ephemeral=True)
+            await interaction.response.send_message("🚫 Wrong channel. Please use the designated gacha channel.", ephemeral=True)
             return
         await _process_stats(interaction)
 
@@ -353,68 +554,84 @@ class GachaCog(commands.Cog):
     @commands.command(name="wish", description="Perform gacha pulls (1 or 10)")
     async def text_wish(self, ctx: commands.Context, amount: int = 1):
         if not is_gacha_channel_context(ctx):
-            await ctx.send("🚫 Wrong channel.")
+            await ctx.send("🚫 Wrong channel. Please use the designated gacha channel.")
             return
-        await _text_process_wish(ctx, amount) # Now calls the full logic
+        if amount not in [1, 10]:
+            await ctx.send("🚫 You can only wish 1 or 10 times at once.")
+            return
+        await _text_process_wish(ctx, amount)
 
     @commands.command(name="inventory", description="View your inventory")
     async def text_inventory(self, ctx: commands.Context):
         if not is_gacha_channel_context(ctx):
-            await ctx.send("🚫 Wrong channel.")
+            await ctx.send("🚫 Wrong channel. Please use the designated gacha channel.")
             return
         await _text_process_inventory(ctx)
 
     @commands.command(name="use", description="Use an item from your inventory")
     async def text_use(self, ctx: commands.Context, item: str):
         if not is_gacha_channel_context(ctx):
-            await ctx.send("🚫 Wrong channel.")
+            await ctx.send("🚫 Wrong channel. Please use the designated gacha channel.")
             return
         await _text_process_use(ctx, item)
 
     @commands.command(name="history", description="View your recent pull history")
     async def text_history(self, ctx: commands.Context):
         if not is_gacha_channel_context(ctx):
-            await ctx.send("🚫 Wrong channel.")
+            await ctx.send("🚫 Wrong channel. Please use the designated gacha channel.")
             return
         await _text_process_history(ctx)
+        
+    @commands.command(name="pity", description="View your current 5-star pity status")
+    async def text_pity(self, ctx: commands.Context):
+        if not is_gacha_channel_context(ctx):
+            await ctx.send("🚫 Wrong channel. Please use the designated gacha channel.")
+            return
+        await _text_process_stats(ctx)
 
     @commands.command(name="leaderboard", description="View the pull leaderboard")
     async def text_leaderboard(self, ctx: commands.Context):
         if not is_gacha_channel_context(ctx):
-            await ctx.send("🚫 Wrong channel.")
+            await ctx.send("🚫 Wrong channel. Please use the designated gacha channel.")
             return
         await _text_process_leaderboard(ctx)
 
     @commands.command(name="stats", description="View your gacha stats")
     async def text_stats(self, ctx: commands.Context):
         if not is_gacha_channel_context(ctx):
-            await ctx.send("🚫 Wrong channel.")
+            await ctx.send("🚫 Wrong channel. Please use the designated gacha channel.")
             return
         await _text_process_stats(ctx)
 
 
     # MODERATOR COMMAND (Slash & Text)
     @app_commands.command(name="setpity", description="Set a user's pity values (moderator only)")
+    @app_commands.checks.has_any_role(*MODERATOR_ROLE_IDS)
     async def slash_setpity(self, interaction: discord.Interaction, member: discord.Member, pity_5: int = 0, pity_4: int = 0, total_pulls: int = 0):
+        
+        # Check if the user has any of the moderator roles (using the role IDs)
         if not any(r.id in MODERATOR_ROLE_IDS for r in interaction.user.roles):
             await interaction.response.send_message("🚫 You do not have permission to use this command.", ephemeral=True)
             return
-        
-        # Use pity_5 as the main counter for the new logic
+
         update_pity_data(member.id, pity_5, pity_4, total_pulls)
         await interaction.response.send_message(
-            f"✅ Pity data for {member.mention} updated: Main Pity Counter: {pity_5}, Total pulls: {total_pulls}", 
+            f"✅ Pity data for {member.mention} updated:\n"
+            f"   - **Main Pity Counter**: `{pity_5}/{PITY_5_STAR_HARD}`\n"
+            f"   - **Total lifetime pulls**: `{total_pulls}`", 
             ephemeral=True
         )
     
     @commands.command(name="setpity", description="Set a user's pity values (moderator only)")
+    @commands.has_any_role(*MODERATOR_ROLE_IDS)
     async def text_setpity(self, ctx: commands.Context, member: discord.Member, pity_5: int = 0, pity_4: int = 0, total_pulls: int = 0):
-        if not any(r.id in MODERATOR_ROLE_IDS for r in ctx.author.roles):
-            await ctx.send("🚫 You do not have permission to use this command.") 
-            return
         
         update_pity_data(member.id, pity_5, pity_4, total_pulls)
-        await ctx.send(f"✅ Pity data for {member.mention} updated: Main Pity Counter: {pity_5}, Total pulls: {total_pulls}")
+        await ctx.send(
+            f"✅ Pity data for {member.mention} updated:\n"
+            f"   - **Main Pity Counter**: `{pity_5}/{PITY_5_STAR_HARD}`\n"
+            f"   - **Total lifetime pulls**: `{total_pulls}`"
+        )
 
 
 # --- COG SETUP FUNCTION ---
