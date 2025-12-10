@@ -201,8 +201,8 @@ class GachaCog(commands.Cog):
                 )
                 # CRITICAL FIX: Return after handling CheckFailure to prevent the
                 # traceback from logging and the "Application did not respond" message.
-                return 
-
+                return
+            
             # Handle role restriction error (for /setpity)
             elif ctx.command.name == 'setpity':
                 await ctx.respond("❌ **Permission Denied.** You must have the Moderator role to use this command.", ephemeral=True)
