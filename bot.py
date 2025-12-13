@@ -1,4 +1,4 @@
-# bot.py (FINAL VERSION - Guild Sync Forced, FIXED)
+# bot.py (FINAL VERSION - FIXED FOR SLASH COMMANDS)
 import os
 import discord
 import sqlite3
@@ -63,39 +63,35 @@ init_db()
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
-
 bot = commands.Bot(command_prefix="$$", intents=intents)
 
 COGS = ["gacha_main", "xp_reporter_main"]
-bot.is_ready_once = False  # Prevent double-sync
+bot.is_ready_once = False  # Prevent double execution
 
-# --- CORRECT setup_hook (NO decorator!) ---
-async def setup_hook():
-    print("⏳ Loading cogs asynchronously...")
-    for cog in COGS:
-        try:
-            await bot.load_extension(cog)
-            print(f"✅ Loaded cog: {cog}")
-        except Exception as e:
-            print(f"❌ Failed to load cog {cog}: {e}")
-            traceback.print_exc()
-
-bot.setup_hook = setup_hook  # <-- THIS LINE MATTERS
-
-# --- READY EVENT ---
+# --- READY EVENT WITH COG LOAD + COMMAND SYNC ---
 @bot.event
 async def on_ready():
     if not bot.is_ready_once:
+        print("⏳ Loading cogs...")
+        for cog in COGS:
+            try:
+                await bot.load_extension(cog)
+                print(f"✅ Loaded cog: {cog}")
+            except Exception as e:
+                print(f"❌ Failed to load cog {cog}: {e}")
+                traceback.print_exc()
+
+        # Sync slash commands after cogs are loaded
         try:
             guild_object = discord.Object(id=TEST_GUILD_ID)
             synced = await bot.tree.sync(guild=guild_object)
             print(f"✅ Synced {len(synced)} slash command(s) to guild {TEST_GUILD_ID}")
         except Exception as e:
-            print(f"❌ FATAL ERROR: Could not sync slash commands: {e}")
+            print(f"❌ Could not sync slash commands: {e}")
 
+        bot.is_ready_once = True
         print(f"🤖 Logged in as {bot.user} ({bot.user.id})")
         print("🚀 Bot is fully ready.")
-        bot.is_ready_once = True
 
 # --- ASYNCIO EXECUTION ---
 async def main():
