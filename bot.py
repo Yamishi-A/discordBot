@@ -1,4 +1,4 @@
-# bot.py (FINAL VERSION - Guild Sync Forced)
+# bot.py (FINAL VERSION - Guild Sync Forced, FIXED)
 import os
 import discord
 import sqlite3
@@ -9,7 +9,6 @@ from dotenv import load_dotenv
 from bot_config import DB_NAME
 
 # --- GUILD ID FOR INSTANT SLASH COMMAND SYNC ---
-# This ID (1357263087069167706) forces the commands to appear immediately on your server.
 TEST_GUILD_ID = 1357263087069167706
 
 # --- Load .env ---
@@ -64,14 +63,14 @@ init_db()
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
+
 bot = commands.Bot(command_prefix="$$", intents=intents)
 
 COGS = ["gacha_main", "xp_reporter_main"]
-bot.is_ready_once = False # Flag to ensure sync only happens once
+bot.is_ready_once = False  # Prevent double-sync
 
-@bot.event
+# --- CORRECT setup_hook (NO decorator!) ---
 async def setup_hook():
-    """Called once when the bot is preparing to connect, before on_ready."""
     print("⏳ Loading cogs asynchronously...")
     for cog in COGS:
         try:
@@ -81,45 +80,42 @@ async def setup_hook():
             print(f"❌ Failed to load cog {cog}: {e}")
             traceback.print_exc()
 
+bot.setup_hook = setup_hook  # <-- THIS LINE MATTERS
+
+# --- READY EVENT ---
 @bot.event
 async def on_ready():
-    """Called when the bot is connected and ready."""
     if not bot.is_ready_once:
-        # --- Command Sync (FORCED SYNC TO YOUR GUILD) ---
         try:
             guild_object = discord.Object(id=TEST_GUILD_ID)
-            await bot.tree.sync(guild=guild_object)
-            print(f"✅ Slash commands synced to Guild ID: {TEST_GUILD_ID}")
+            synced = await bot.tree.sync(guild=guild_object)
+            print(f"✅ Synced {len(synced)} slash command(s) to guild {TEST_GUILD_ID}")
         except Exception as e:
             print(f"❌ FATAL ERROR: Could not sync slash commands: {e}")
 
-        print(f"Logged in as {bot.user} ({bot.user.id})")
-        print("Bot is fully ready.")
+        print(f"🤖 Logged in as {bot.user} ({bot.user.id})")
+        print("🚀 Bot is fully ready.")
         bot.is_ready_once = True
 
-
-# --- ASYNCIO EXECUTION BLOCK ---
+# --- ASYNCIO EXECUTION ---
 async def main():
     if not TOKEN:
-        print("❌ FATAL ERROR: DISCORD_TOKEN is not set. Check your .env file.")
+        print("❌ FATAL ERROR: DISCORD_TOKEN is not set.")
         return
 
     print("✅ Token loaded successfully.")
-    print("⏳ Starting bot with asyncio...")
+    print("⏳ Starting bot...")
 
     try:
-        # Use async with for clean startup/shutdown
         async with bot:
             await bot.start(TOKEN)
     except Exception as e:
-         print(f"❌ FATAL ERROR during bot startup: {e}")
-         return
-
+        print(f"❌ FATAL ERROR during bot startup: {e}")
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\nBot stopped by user.")
+        print("\n🛑 Bot stopped by user.")
     except Exception as e:
-        print(f"An unexpected error occurred: {e}")
+        print(f"❌ Unexpected error: {e}")
