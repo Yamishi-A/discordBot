@@ -267,26 +267,65 @@ class GachaCog(commands.Cog):
         else:
             await interaction.response.send_message("❌ You don't own that item.", ephemeral=True)
 
-    # Add this inside the GachaCog class
-
     # -------- HELP --------
     @app_commands.command(name="help", description="Show all Gacha commands")
     async def slash_help(self, interaction: discord.Interaction):
         embed = discord.Embed(title="📝 Gacha Commands Help", color=discord.Color.green())
-        
         commands_info = {
             "/wish <amount>": "Perform a gacha pull (1-10 at a time).",
             "/pity": "Check your current 5★ pity and total pulls.",
             "/inventory": "View your inventory items.",
             "/history": "See your most recent pulls (last 20).",
-            "/use <item>": "Use an item from your inventory."
+            "/use <item>": "Use an item from your inventory.",
+            "/leaderboard": "View the top players by total 5★ pulls.",
+            "/banner": "See the current banner and featured items.",
+            "/rates": "Check drop rates, pity rules, and special chances.",
+            "/top5stars": "See users with the most 5★ pulls."
         }
-        
         for cmd, desc in commands_info.items():
             embed.add_field(name=cmd, value=desc, inline=False)
-        
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+    # -------- LEADERBOARD --------
+    @app_commands.command(name="leaderboard", description="Top players by total 5★ pulls")
+    async def slash_leaderboard(self, interaction: discord.Interaction):
+        with db() as conn:
+            rows = conn.execute("SELECT user_id, pity_5_star FROM pity ORDER BY pity_5_star DESC LIMIT 10").fetchall()
+        embed = discord.Embed(title="🏆 5★ Pull Leaderboard", color=discord.Color.gold())
+        if not rows:
+            embed.description = "No data yet."
+        else:
+            for idx, (uid, pulls) in enumerate(rows, 1):
+                user = self.bot.get_user(uid)
+                name = user.display_name if user else f"User {uid}"
+                embed.add_field(name=f"{idx}. {name}", value=f"{pulls} 5★ pulls", inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    # -------- TOP 5★ USERS --------
+    @app_commands.command(name="top5stars", description="Users with the most 5★ pulls")
+    async def slash_top5stars(self, interaction: discord.Interaction):
+        await self.slash_leaderboard(interaction)  # Alias to leaderboard
+
+    # -------- BANNER --------
+    @app_commands.command(name="banner", description="See current banner info")
+    async def slash_banner(self, interaction: discord.Interaction):
+        embed = discord.Embed(title="✨ Current Banner", color=discord.Color.teal())
+        embed.add_field(name="Featured 5★ Items", value="\n".join(LOOT_TABLE[5]), inline=False)
+        embed.add_field(name="Featured 4★ Items", value="\n".join(LOOT_TABLE[4]), inline=False)
+        embed.add_field(name="5★ Rate", value=f"{RATE_5_STAR*100:.2f}%")
+        embed.add_field(name="4★ Rate", value=f"{RATE_4_STAR*100:.2f}%")
+        embed.add_field(name="Pity", value=f"Hard pity at {HARD_PITY_5} pulls")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    # -------- RATES --------
+    @app_commands.command(name="rates", description="Check drop rates and pity info")
+    async def slash_rates(self, interaction: discord.Interaction):
+        embed = discord.Embed(title="📊 Gacha Rates", color=discord.Color.light_grey())
+        embed.add_field(name="3★ Items", value=f"{(1 - RATE_5_STAR - RATE_4_STAR)*100:.2f}%")
+        embed.add_field(name="4★ Items", value=f"{RATE_4_STAR*100:.2f}%")
+        embed.add_field(name="5★ Items", value=f"{RATE_5_STAR*100:.2f}%")
+        embed.add_field(name="Pity Rules", value=f"Hard pity at {HARD_PITY_5} pulls\n30th pull 50% chance for 5★")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # =====================================================
 # SETUP
