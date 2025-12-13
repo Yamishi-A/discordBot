@@ -1,4 +1,5 @@
-# bot.py (FINAL VERSION - FIXED FOR SLASH COMMANDS)
+# bot.py — FINAL (Slash Commands FIXED, Guild Sync Forced)
+
 import os
 import discord
 import sqlite3
@@ -8,14 +9,20 @@ from discord.ext import commands
 from dotenv import load_dotenv
 from bot_config import DB_NAME
 
-# --- GUILD ID FOR INSTANT SLASH COMMAND SYNC ---
-TEST_GUILD_ID = 1357263087069167706
+# =========================================================
+# 🔧 TEST SERVER ID (ONLY this server gets instant slash cmds)
+# =========================================================
+TEST_GUILD_ID = 1357263087069167706  # ← CHANGE when needed
 
-# --- Load .env ---
+# =========================================================
+# 🔐 Load token
+# =========================================================
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
-# --- DATABASE SETUP ---
+# =========================================================
+# 🗄️ Database setup
+# =========================================================
 def init_db():
     try:
         conn = sqlite3.connect(DB_NAME)
@@ -52,66 +59,89 @@ def init_db():
         conn.commit()
         print(f"✅ Database {DB_NAME} initialized and tables checked.")
     except Exception as e:
-        print(f"❌ FATAL ERROR: Could not initialize database: {e}")
+        print(f"❌ DATABASE ERROR: {e}")
         exit(1)
     finally:
         conn.close()
 
 init_db()
 
-# --- BOT SETUP ---
+# =========================================================
+# 🤖 Bot setup
+# =========================================================
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
+
 bot = commands.Bot(command_prefix="$$", intents=intents)
 
-COGS = ["gacha_main", "xp_reporter_main"]
-bot.is_ready_once = False  # Prevent double execution
+# =========================================================
+# 🧪 TEST SLASH COMMAND (CONFIRMS EVERYTHING WORKS)
+# =========================================================
+@bot.tree.command(name="ping", description="Test slash command")
+async def ping(interaction: discord.Interaction):
+    await interaction.response.send_message("pong 🏓")
 
-# --- READY EVENT WITH COG LOAD + COMMAND SYNC ---
+# =========================================================
+# 📦 Cogs
+# =========================================================
+COGS = [
+    "gacha_main",
+    "xp_reporter_main"
+]
+
+# =========================================================
+# 🔁 Load cogs BEFORE syncing commands
+# =========================================================
+@bot.event
+async def setup_hook():
+    print("⏳ Loading cogs asynchronously...")
+    for cog in COGS:
+        try:
+            await bot.load_extension(cog)
+            print(f"✅ Loaded cog: {cog}")
+        except Exception as e:
+            print(f"❌ Failed to load cog {cog}: {e}")
+            traceback.print_exc()
+
+# =========================================================
+# 🚀 Ready event → FORCE slash command sync
+# =========================================================
 @bot.event
 async def on_ready():
-    if not bot.is_ready_once:
-        print("⏳ Loading cogs...")
-        for cog in COGS:
-            try:
-                await bot.load_extension(cog)
-                print(f"✅ Loaded cog: {cog}")
-            except Exception as e:
-                print(f"❌ Failed to load cog {cog}: {e}")
-                traceback.print_exc()
+    guild = discord.Object(id=TEST_GUILD_ID)
 
-        # Sync slash commands after cogs are loaded
-        try:
-            guild_object = discord.Object(id=TEST_GUILD_ID)
-            synced = await bot.tree.sync(guild=guild_object)
-            print(f"✅ Synced {len(synced)} slash command(s) to guild {TEST_GUILD_ID}")
-        except Exception as e:
-            print(f"❌ Could not sync slash commands: {e}")
+    try:
+        print(f"🔄 Syncing slash commands to guild {TEST_GUILD_ID}")
 
-        bot.is_ready_once = True
-        print(f"🤖 Logged in as {bot.user} ({bot.user.id})")
-        print("🚀 Bot is fully ready.")
+        # ⭐ THE CRITICAL FIX ⭐
+        bot.tree.copy_global_to(guild=guild)
 
-# --- ASYNCIO EXECUTION ---
+        synced = await bot.tree.sync(guild=guild)
+        print(f"✅ Synced {len(synced)} slash command(s)")
+
+    except Exception as e:
+        print(f"❌ SLASH SYNC FAILED: {e}")
+
+    print(f"🤖 Logged in as {bot.user} ({bot.user.id})")
+    print("🚀 Bot is fully ready.")
+
+# =========================================================
+# ▶️ Start bot
+# =========================================================
 async def main():
     if not TOKEN:
-        print("❌ FATAL ERROR: DISCORD_TOKEN is not set.")
+        print("❌ DISCORD_TOKEN missing in .env")
         return
 
     print("✅ Token loaded successfully.")
     print("⏳ Starting bot...")
 
-    try:
-        async with bot:
-            await bot.start(TOKEN)
-    except Exception as e:
-        print(f"❌ FATAL ERROR during bot startup: {e}")
+    async with bot:
+        await bot.start(TOKEN)
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
         print("\n🛑 Bot stopped by user.")
-    except Exception as e:
-        print(f"❌ Unexpected error: {e}")
