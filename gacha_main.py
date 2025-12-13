@@ -267,6 +267,27 @@ class GachaCog(commands.Cog):
         else:
             await interaction.response.send_message("❌ You don't own that item.", ephemeral=True)
 
+    # Add this inside the GachaCog class
+
+    # -------- HELP --------
+    @app_commands.command(name="help", description="Show all Gacha commands")
+    async def slash_help(self, interaction: discord.Interaction):
+        embed = discord.Embed(title="📝 Gacha Commands Help", color=discord.Color.green())
+        
+        commands_info = {
+            "/wish <amount>": "Perform a gacha pull (1-10 at a time).",
+            "/pity": "Check your current 5★ pity and total pulls.",
+            "/inventory": "View your inventory items.",
+            "/history": "See your most recent pulls (last 20).",
+            "/use <item>": "Use an item from your inventory."
+        }
+        
+        for cmd, desc in commands_info.items():
+            embed.add_field(name=cmd, value=desc, inline=False)
+        
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
 # =====================================================
 # SETUP
 # =====================================================
