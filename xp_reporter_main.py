@@ -1,21 +1,22 @@
-# xp_reporter_main.py (REFINED VERSION)
-# Cleaned, modular, scalable, same behavior
+# xp_reporter_main.py (FINAL – CASE-INSENSITIVE, FORMAT-COMPATIBLE, MOD-REVIEW FLOW)
+# Fully supports the user's exact submission format
+# - Ignores Channel(s)
+# - Case-insensitive everywhere
+# - Normalizes AFK FARM -> AFK TRAINING
+# - Auto-approve / Mod-review / Hard-deny logic
+# - Mods approve via ✅ / ❌ reactions
 
 import discord
 import re
 import math
 import logging
-import traceback
 from discord.ext import commands
 from bot_config import INPUT_CHANNEL_IDS, OUTPUT_CHANNEL_IDS, SUBMISSION_APPROVER_ROLE_IDS
 
 # --------------------------------------------------
 # LOGGING
 # --------------------------------------------------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger("xp_reporter")
 
 # --------------------------------------------------
@@ -25,7 +26,7 @@ EMOJI_STR1 = "⭐"
 BASE_CROWNS = 500
 
 # --------------------------------------------------
-# TRAINING TIERS (DATA-DRIVEN)
+# TRAINING TIERS
 # --------------------------------------------------
 TRAINING_TIERS = [
     (1, 10, 100, 1),
@@ -40,37 +41,25 @@ def get_training_tier_data(level: int) -> dict:
     return {"base_xp": 100, "tier": 1}
 
 # --------------------------------------------------
-# ACTIVITIES
+# ACTIVITY RULES
 # --------------------------------------------------
-ACTIVITY_MULTIPLIERS = {
-    "troll mission": 1.0,
-    "solo training": 1.0,
-    "afk farm i": 1.0,
-    "afk farm ii": 1.0,
-    "afk farm iii": 1.15,
+AUTO_APPROVED = {
+    "solo training",
+    "troll mission",
+    "afk training i",
+    "afk training ii",
+    "afk training iii",
 }
 
-APPROVED_ACTIVITIES = set(ACTIVITY_MULTIPLIERS.keys())
+REVIEW_KEYWORDS = {"wholesome", "battle", "dungeon"}
 
-# --------------------------------------------------
-# CALCULATION HELPERS
-# --------------------------------------------------
-
-def calculate_xp(base_xp: int, base_multiplier: float, xp_boost: float):
-    total_multiplier = base_multiplier * (1 + xp_boost)
-    return math.floor(base_xp * total_multiplier), total_multiplier
-
-
-def calculate_crowns(activity: str, crowns_boost: float):
-    if activity != "troll mission":
-        return 0
-    return int(BASE_CROWNS * (1 + crowns_boost))
-
-
-def calculate_rift_tokens(activity: str, training_tier: int):
-    if activity == "troll mission":
-        return training_tier
-    return 0
+ACTIVITY_MULTIPLIERS = {
+    "solo training": 1.0,
+    "troll mission": 1.0,
+    "afk training i": 1.0,
+    "afk training ii": 1.0,
+    "afk training iii": 1.15,
+}
 
 # --------------------------------------------------
 # COG
@@ -78,71 +67,86 @@ def calculate_rift_tokens(activity: str, training_tier: int):
 class XPReporterCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self.pending_reviews = {}  # message_id -> parsed data
         self._cached_mod_ping = None
 
     # --------------------------------------------------
-    # PARSER
+    # PARSER (STRICT CORE, FLEXIBLE TEXT)
     # --------------------------------------------------
-    def _parse_xp_submission(self, message):
-        content = message.content.strip()
-        data = {}
-
+    def _parse(self, message):
+        content = message.content
         try:
-            data['name'] = re.search(
-                r"\*\*Character Name\(s\):\*\*\s*(.+)",
-                content, re.IGNORECASE
-            ).group(1).strip()
-
-            data['level'] = int(re.search(
-                r"\*\*Character Level:\*\*\s*(\d+)",
-                content, re.IGNORECASE
-            ).group(1))
-
-            data['progression'] = re.search(
+            name = re.search(r"\*\*Character Name\(s\):\*\*\s*(.+)", content, re.I).group(1).strip()
+            level = int(re.search(r"\*\*Character Level:\*\*\s*(\d+)", content, re.I).group(1))
+            progression = re.search(
                 r"\*\*Type of Progression:\*\*(.*?)(?=\*\*|\Z)",
-                content, re.IGNORECASE | re.DOTALL
+                content,
+                re.I | re.S
             ).group(1).strip()
 
-            xp_boost = re.search(r"\*\*Boost\(s\) for XP:\*\*\s*(\d+)%", content)
-            crowns_boost = re.search(r"\*\*Boost\(s\) for Crowns:\*\*\s*(\d+)%", content)
+            xp_boost_match = re.search(
+                r"\*\*Boost\(s\) for XP:\*\*\s*(\d+)%",
+                content,
+                re.I
+            )
+            crowns_boost_match = re.search(
+                r"\*\*Boost\(s\) for Crowns:\*\*\s*(\d+)%",
+                content,
+                re.I
+            )
 
-            data['xp_boost'] = int(xp_boost.group(1)) / 100 if xp_boost else 0.0
-            data['crowns_boost'] = int(crowns_boost.group(1)) / 100 if crowns_boost else 0.0
+            xp_boost = int(xp_boost_match.group(1)) / 100 if xp_boost_match else 0.0
+            crowns_boost = int(crowns_boost_match.group(1)) / 100 if crowns_boost_match else 0.0
 
+            progression_key = progression.lower().strip()
+
+            # Normalization (AFK FARM -> AFK TRAINING)
+            progression_key = progression_key.replace("farm", "training")
+
+            return {
+                "valid": True,
+                "name": name,
+                "level": level,
+                "progression": progression,
+                "progression_key": progression_key,
+                "xp_boost": xp_boost,
+                "crowns_boost": crowns_boost,
+            }
         except Exception:
-            return {"valid": False, "reason": "Format Error"}
-
-        data['progression_key'] = data['progression'].lower().strip()
-        data['valid'] = True
-        return data
+            return {"valid": False}
 
     # --------------------------------------------------
-    # LISTENER
+    # MESSAGE LISTENER
     # --------------------------------------------------
     @commands.Cog.listener()
     async def on_message(self, message):
-        if message.author.bot or message.channel.id not in INPUT_CHANNEL_IDS:
+        if message.author.bot:
             return
 
         if not message.content.lower().startswith("**character name(s):**"):
             return
 
-        data = self._parse_xp_submission(message)
+        data = self._parse(message)
 
-        if not data.get('valid'):
-            await message.add_reaction('❌')
+        # -------- FORMAT FAILURE --------
+        if not data.get("valid"):
+            await message.add_reaction("❌")
             await message.channel.send(
-                f"{message.author.mention}, submission format error. Please follow the template exactly.",
+                f"{message.author.mention}, submission denied. Please follow the required format exactly.",
                 delete_after=15
             )
-            log.warning("Submission parse failure from %s", message.author)
             return
 
-        # --------------------------------------------------
-        # ACTIVITY VALIDATION
-        # --------------------------------------------------
-        if data['progression_key'] not in APPROVED_ACTIVITIES:
-            await message.add_reaction('❌')
+        activity = data["progression_key"]
+
+        # -------- AUTO APPROVED --------
+        if activity in AUTO_APPROVED:
+            await self._process_submission(message, data)
+            return
+
+        # -------- NEEDS MOD REVIEW --------
+        if any(keyword in activity for keyword in REVIEW_KEYWORDS):
+            await message.add_reaction("❓")
 
             if self._cached_mod_ping is None:
                 self._cached_mod_ping = " ".join(
@@ -151,93 +155,94 @@ class XPReporterCog(commands.Cog):
                     if (role := message.guild.get_role(rid))
                 )
 
-            embed = discord.Embed(
-                title="🚫 Submission Denied",
-                description=(
-                    f"{message.author.mention}, **{data['progression']}** is not auto-approved.\n\n"
-                    f"Approved activities: {', '.join(a.title() for a in APPROVED_ACTIVITIES)}\n\n"
-                    f"Manual review required: {self._cached_mod_ping}"
-                ),
-                color=discord.Color.red()
+            await message.channel.send(
+                f"⚠️ **Manual Review Required**\n"
+                f"Submission by {message.author.mention} requires approval.\n"
+                f"{self._cached_mod_ping}\n\n"
+                f"React to the original message with ✅ to approve or ❌ to deny."
             )
 
-            await message.channel.send(embed=embed)
-            log.info("Unknown activity denied: %s", data['progression'])
+            self.pending_reviews[message.id] = data
             return
 
-        # --------------------------------------------------
-        # PROCESSING
-        # --------------------------------------------------
+        # -------- HARD DENY --------
+        await message.add_reaction("❌")
+        await message.channel.send(
+            f"{message.author.mention}, submission denied. Invalid progression type.",
+            delete_after=15
+        )
+
+    # --------------------------------------------------
+    # MOD REACTION HANDLER
+    # --------------------------------------------------
+    @commands.Cog.listener()
+    async def on_reaction_add(self, reaction, user):
+        if user.bot:
+            return
+
+        message = reaction.message
+
+        if message.id not in self.pending_reviews:
+            return
+
+        if not any(role.id in SUBMISSION_APPROVER_ROLE_IDS for role in user.roles):
+            return
+
+        data = self.pending_reviews.pop(message.id)
+
+        if reaction.emoji == "❌":
+            await message.channel.send(f"❌ Submission denied by {user.mention}.")
+            return
+
+        if reaction.emoji == "✅":
+            await self._process_submission(message, data)
+
+    # --------------------------------------------------
+    # PROCESSING
+    # --------------------------------------------------
+    async def _process_submission(self, message, data):
+        tier_data = get_training_tier_data(data["level"])
+        base_multiplier = ACTIVITY_MULTIPLIERS.get(data["progression_key"], 1.0)
+
+        final_xp = math.floor(
+            tier_data["base_xp"] * base_multiplier * (1 + data["xp_boost"])
+        )
+
+        final_crowns = (
+            int(BASE_CROWNS * (1 + data["crowns_boost"]))
+            if data["progression_key"] == "troll mission"
+            else 0
+        )
+
+        rift_tokens = tier_data["tier"] if data["progression_key"] == "troll mission" else 0
+
+        gains = [f"{final_xp} XP"]
+        if final_crowns > 0:
+            gains.append(f"{final_crowns} Crowns")
+        if rift_tokens > 0:
+            gains.append(f"{rift_tokens} Rift Tokens")
+
+        # Output channel mapping (fallback safe)
         try:
-            tier_data = get_training_tier_data(data['level'])
-            base_multiplier = ACTIVITY_MULTIPLIERS[data['progression_key']]
-
-            final_xp, total_multiplier = calculate_xp(
-                tier_data['base_xp'], base_multiplier, data['xp_boost']
-            )
-
-            final_crowns = calculate_crowns(
-                data['progression_key'], data['crowns_boost']
-            )
-
-            rift_tokens = calculate_rift_tokens(
-                data['progression_key'], tier_data['tier']
-            )
-
-            gains = [f"{final_xp} XP"]
-            if final_crowns > 0:
-                gains.append(f"{final_crowns} Crowns")
-            if rift_tokens > 0:
-                gains.append(f"{rift_tokens} Rift Tokens")
-
-            # Channel mapping
-            try:
-                idx = INPUT_CHANNEL_IDS.index(message.channel.id)
-                output_channel = self.bot.get_channel(OUTPUT_CHANNEL_IDS[idx])
-            except Exception:
-                output_channel = message.channel
-
-            await message.add_reaction('✅')
-
-            embed = discord.Embed(
-                title=f"✅ Progression Logged: {data['progression'].title()}",
-                description=f"Submitted by {message.author.mention}",
-                color=discord.Color.green()
-            )
-
-            embed.add_field(name="Character(s)", value=data['name'], inline=True)
-            embed.add_field(name="Level", value=data['level'], inline=True)
-            embed.add_field(name="Training Tier", value=f"TT{tier_data['tier']}", inline=True)
-
-            embed.add_field(
-                name="Multipliers",
-                value=(
-                    f"Activity: `{base_multiplier:.2f}x`\n"
-                    f"XP Boost: `{data['xp_boost']*100:.0f}%`\n"
-                    f"Crowns Boost: `{data['crowns_boost']*100:.0f}%`"
-                ),
-                inline=False
-            )
-
-            embed.add_field(
-                name=f"{EMOJI_STR1} Total Gains",
-                value=f"**{', '.join(gains)}**",
-                inline=False
-            )
-
-            embed.set_footer(
-                text=f"Base XP: {tier_data['base_xp']} | Final Multiplier: {total_multiplier:.2f}x"
-            )
-
-            await output_channel.send(embed=embed)
-            log.info("Submission processed successfully for %s", message.author)
-
+            idx = INPUT_CHANNEL_IDS.index(message.channel.id)
+            output_channel = self.bot.get_channel(OUTPUT_CHANNEL_IDS[idx])
         except Exception:
-            log.error("Fatal processing error", exc_info=True)
-            await message.add_reaction('❓')
-            await message.channel.send(
-                f"❌ Internal error while processing submission ({message.author.mention})"
-            )
+            output_channel = message.channel
+
+        await message.add_reaction("✅")
+
+        embed = discord.Embed(
+            title=f"✅ Progression Logged: {data['progression'].title()}",
+            description=f"Submitted by {message.author.mention}",
+            color=discord.Color.green(),
+        )
+
+        embed.add_field(name="Character(s)", value=data["name"], inline=True)
+        embed.add_field(name="Level", value=data["level"], inline=True)
+        embed.add_field(name="Training Tier", value=f"TT{tier_data['tier']}", inline=True)
+        embed.add_field(name=f"{EMOJI_STR1} Total Gains", value=f"**{', '.join(gains)}**", inline=False)
+
+        await output_channel.send(embed=embed)
 
 # --------------------------------------------------
 # SETUP
