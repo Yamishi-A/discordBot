@@ -286,6 +286,24 @@ class GachaCog(commands.Cog):
             embed.add_field(name=cmd, value=desc, inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+    # -------- SET PITY (MODERATOR ONLY) --------
+    @app_commands.command(name="setpity", description="Set a user's 5★ pity and total pulls (Mods only)")
+    @app_commands.checks.has_any_role(*MODERATOR_ROLE_IDS)
+    async def slash_setpity(self, interaction: discord.Interaction, member: discord.Member, pity: int, total: int):
+        if pity < 0 or total < 0:
+            return await interaction.response.send_message("❌ Pity and total pulls must be 0 or higher.", ephemeral=True)
+    
+        save_pity(member.id, pity, total)
+        await interaction.response.send_message(f"✅ {member.display_name}'s pity set to {pity} and total pulls to {total}.", ephemeral=True)
+    
+    @slash_setpity.error
+    async def slash_setpity_error(self, interaction: discord.Interaction, error):
+        if isinstance(error, app_commands.errors.MissingAnyRole):
+            await interaction.response.send_message("❌ You do not have permission to use this command.", ephemeral=True)
+        else:
+            await interaction.response.send_message(f"❌ An error occurred: {error}", ephemeral=True)
+
+
     # -------- LEADERBOARD --------
     @app_commands.command(name="leaderboard", description="Top players by total 5★ pulls")
     async def slash_leaderboard(self, interaction: discord.Interaction):
