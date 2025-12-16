@@ -36,7 +36,6 @@ ACTIVITY_MULTIPLIERS = {
     "afk training iii": 1.15,
 }
 
-# Review-only multipliers
 REVIEW_MULTIPLIERS = {
     "battle": 4.0,
     "wholesome": 2.5,
@@ -63,7 +62,7 @@ REVIEW_KEYWORDS = {"battle", "wholesome", "dungeon"}
 class XPReporterCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.pending_reviews = {}  # review_message_id -> submission data
+        self.pending_reviews = {}
         self._cached_mod_ping = None
 
     # ────────────────────────
@@ -124,12 +123,10 @@ class XPReporterCog(commands.Cog):
 
         activity = data["progression_key"]
 
-        # ── Auto-approved
         if activity in ACTIVITY_MULTIPLIERS:
             await self._process_submission(message, data)
             return
 
-        # ── Manual review
         if any(k in activity for k in REVIEW_KEYWORDS):
             await message.add_reaction("❓")
 
@@ -147,11 +144,7 @@ class XPReporterCog(commands.Cog):
             )
             embed.add_field(name="Character(s)", value=data["name"], inline=True)
             embed.add_field(name="Level", value=data["level"], inline=True)
-            embed.add_field(
-                name="Progression",
-                value=data["progression"].title(),
-                inline=False
-            )
+            embed.add_field(name="Progression", value=data["progression"].title(), inline=False)
             embed.set_footer(text="React with ✅ to approve or ❌ to deny")
 
             review_msg = await message.channel.send(embed=embed)
@@ -161,41 +154,11 @@ class XPReporterCog(commands.Cog):
             self.pending_reviews[review_msg.id] = data
             return
 
-        # ── Invalid progression
         await message.add_reaction("❌")
         await message.channel.send(
             f"{message.author.mention}, invalid progression type.",
             delete_after=15
         )
-
-    # ────────────────────────
-    # Reaction Listener
-    # ────────────────────────
-    @commands.Cog.listener()
-    async def on_reaction_add(self, reaction, user):
-        if user.bot:
-            return
-
-        if reaction.message.id not in self.pending_reviews:
-            return
-
-        if not any(role.id in SUBMISSION_APPROVER_ROLE_IDS for role in user.roles):
-            return
-
-        data = self.pending_reviews.pop(reaction.message.id)
-
-        if reaction.emoji == "❌":
-            await reaction.message.channel.send(
-                f"❌ Submission denied by {user.mention}."
-            )
-            return
-
-        if reaction.emoji == "✅":
-            await self._process_submission(
-                reaction.message,
-                data,
-                reviewer=user
-            )
 
     # ────────────────────────
     # Processing
@@ -213,6 +176,16 @@ class XPReporterCog(commands.Cog):
         )
 
         gains = [f"{final_xp} XP"]
+
+        # 🧌 Troll Mission Rewards
+        if data["progression_key"] == "troll mission":
+            final_crowns = math.floor(
+                BASE_CROWNS * (1 + data["crowns_boost"])
+            )
+            rift_tokens = tier["tier"]
+
+            gains.append(f"{final_crowns} Crowns")
+            gains.append(f"{rift_tokens} Rift Token{'s' if rift_tokens > 1 else ''}")
 
         try:
             idx = INPUT_CHANNEL_IDS.index(data["channel"].id)
@@ -245,3 +218,4 @@ class XPReporterCog(commands.Cog):
 # ────────────────────────
 async def setup(bot):
     await bot.add_cog(XPReporterCog(bot))
+
