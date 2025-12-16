@@ -34,7 +34,7 @@ LOOT_TABLE = {
         "250 XP Crystal", "25,000 Crowns"
     ],
     5: [
-        "Exalted Grade Weapon", "Exalted Grade Armor",
+        "Exalted Grade",
         "20% XP Multiplier (1 Week)",
         "500 XP Crystal", "50,000 Crowns"
     ]
