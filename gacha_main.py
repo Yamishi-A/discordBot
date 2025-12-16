@@ -25,18 +25,32 @@ SPECIAL_30_CHANCE = 0.5
 
 LOOT_TABLE = {
     3: [
-        "Scrap Grade Weapon", "Scrap Grade Armor",
-        "50 XP Crystal", "100 XP Crystal",
+        "Scrap Grade Weapon",
+        "Scrap Grade Armor",
+        "Rusted Seax",
+        "Padded Furs & Wood",
+        "10% XP Multiplier Token (1 Use)",
+        "50 XP Crystal",
+        "100 XP Crystal",
+        "1,000 Crowns",
         "10,000 Crowns"
     ],
     4: [
-        "Named Grade Weapon", "Named Grade Armor",
-        "250 XP Crystal", "25,000 Crowns"
+        "Named Grade Weapon",
+        "Named Grade Armor",
+        "Huscarl Bearded Axe",
+        "Huscarl Lamellar",
+        "The Einherjar’s Edge",
+        "The Einherjar’s Hauberk",
+        "10% XP Multiplier Token (1 Week)",
+        "250 XP Crystal",
+        "25,000 Crowns"
     ],
     5: [
         "Exalted Grade",
         "20% XP Multiplier (1 Week)",
-        "500 XP Crystal", "50,000 Crowns"
+        "500 XP Crystal",
+        "50,000 Crowns"
     ]
 }
 
