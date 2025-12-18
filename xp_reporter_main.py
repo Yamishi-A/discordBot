@@ -1,11 +1,15 @@
 # xp_reporter_main.py
-# FINAL – Manual Review System + Mod Credit + Correct Multipliers
+# FINAL – Manual Review System (FIXED, CLEAN, MOD-LOGGED)
 
 import discord
 import re
 import math
 from discord.ext import commands
-from bot_config import INPUT_CHANNEL_IDS, OUTPUT_CHANNEL_IDS, SUBMISSION_APPROVER_ROLE_IDS
+from bot_config import (
+    INPUT_CHANNEL_IDS,
+    OUTPUT_CHANNEL_IDS,
+    SUBMISSION_APPROVER_ROLE_IDS,
+)
 
 EMOJI_STR1 = "⭐"
 BASE_CROWNS = 500
@@ -26,7 +30,7 @@ def get_training_tier_data(level: int) -> dict:
     return {"base_xp": 100, "tier": 1}
 
 # ────────────────────────
-# Activity Multipliers
+# Multipliers
 # ────────────────────────
 ACTIVITY_MULTIPLIERS = {
     "solo training": 1.0,
@@ -39,6 +43,7 @@ ACTIVITY_MULTIPLIERS = {
 REVIEW_MULTIPLIERS = {
     "battle": 4.0,
     "wholesome": 2.5,
+    "dungeon": 2.0,
 }
 
 ACTIVITY_ALIASES = {
@@ -71,27 +76,29 @@ class XPReporterCog(commands.Cog):
     def _parse(self, message):
         content = message.content
 
-        name_match = re.search(r"\*\*Character Name\(s\):\*\*\s*(.+)", content, re.I)
-        level_match = re.search(r"\*\*Character Level:\*\*\s*(\d+)", content, re.I)
-        prog_match = re.search(
+        name = re.search(r"\*\*Character Name\(s\):\*\*\s*(.+)", content, re.I)
+        level = re.search(r"\*\*Character Level:\*\*\s*(\d+)", content, re.I)
+        prog = re.search(
             r"\*\*Type of Progression:\*\*(.*?)(?=\*\*|\Z)",
             content,
-            re.I | re.S
+            re.I | re.S,
         )
-        xp_boost_match = re.search(r"\*\*Boost\(s\) for XP:\*\*\s*(\d+)%", content, re.I)
-        crowns_boost_match = re.search(r"\*\*Boost\(s\) for Crowns:\*\*\s*(\d+)%", content, re.I)
+        xp_boost = re.search(r"\*\*Boost\(s\) for XP:\*\*\s*(\d+)%", content, re.I)
+        crowns_boost = re.search(
+            r"\*\*Boost\(s\) for Crowns:\*\*\s*(\d+)%", content, re.I
+        )
 
-        progression = prog_match.group(1).strip() if prog_match else None
-        progression_key = (progression or "").lower().replace("farm", "training").strip()
-        progression_key = ACTIVITY_ALIASES.get(progression_key, progression_key)
+        progression = prog.group(1).strip() if prog else None
+        key = (progression or "").lower().replace("farm", "training").strip()
+        key = ACTIVITY_ALIASES.get(key, key)
 
         return {
-            "name": name_match.group(1).strip() if name_match else None,
-            "level": int(level_match.group(1)) if level_match else None,
+            "name": name.group(1).strip() if name else None,
+            "level": int(level.group(1)) if level else None,
             "progression": progression,
-            "progression_key": progression_key,
-            "xp_boost": int(xp_boost_match.group(1)) / 100 if xp_boost_match else 0.0,
-            "crowns_boost": int(crowns_boost_match.group(1)) / 100 if crowns_boost_match else 0.0,
+            "progression_key": key,
+            "xp_boost": int(xp_boost.group(1)) / 100 if xp_boost else 0.0,
+            "crowns_boost": int(crowns_boost.group(1)) / 100 if crowns_boost else 0.0,
             "author": message.author,
             "channel": message.channel,
         }
@@ -103,10 +110,8 @@ class XPReporterCog(commands.Cog):
     async def on_message(self, message):
         if message.author.bot:
             return
-
         if message.channel.id not in INPUT_CHANNEL_IDS:
             return
-
         if not message.content.lower().startswith("**character name(s):**"):
             return
 
@@ -115,18 +120,16 @@ class XPReporterCog(commands.Cog):
         missing = [k for k in ("name", "level", "progression") if not data.get(k)]
         if missing:
             await message.add_reaction("❌")
-            await message.channel.send(
-                f"{message.author.mention}, missing required fields: {', '.join(missing)}",
-                delete_after=20
-            )
             return
 
         activity = data["progression_key"]
 
+        # Auto-processed
         if activity in ACTIVITY_MULTIPLIERS:
             await self._process_submission(message, data)
             return
 
+        # Manual review
         if any(k in activity for k in REVIEW_KEYWORDS):
             await message.add_reaction("❓")
 
@@ -140,25 +143,66 @@ class XPReporterCog(commands.Cog):
             embed = discord.Embed(
                 title="⚠️ Manual Review Required",
                 description=f"{self._cached_mod_ping}\nSubmitted by {message.author.mention}",
-                color=discord.Color.orange()
+                color=discord.Color.orange(),
             )
             embed.add_field(name="Character(s)", value=data["name"], inline=True)
             embed.add_field(name="Level", value=data["level"], inline=True)
-            embed.add_field(name="Progression", value=data["progression"].title(), inline=False)
+            embed.add_field(
+                name="Progression", value=data["progression"].title(), inline=False
+            )
             embed.set_footer(text="React with ✅ to approve or ❌ to deny")
 
             review_msg = await message.channel.send(embed=embed)
             await review_msg.add_reaction("✅")
             await review_msg.add_reaction("❌")
 
-            self.pending_reviews[review_msg.id] = data
+            self.pending_reviews[review_msg.id] = {
+                "data": data,
+                "original_message": message,
+            }
+
+    # ────────────────────────
+    # Reaction Listener
+    # ────────────────────────
+    @commands.Cog.listener()
+    async def on_reaction_add(self, reaction, user):
+        if user.bot:
             return
 
-        await message.add_reaction("❌")
-        await message.channel.send(
-            f"{message.author.mention}, invalid progression type.",
-            delete_after=15
-        )
+        msg = reaction.message
+        if msg.id not in self.pending_reviews:
+            return
+
+        if not any(r.id in SUBMISSION_APPROVER_ROLE_IDS for r in user.roles):
+            return
+
+        entry = self.pending_reviews.pop(msg.id)
+        data = entry["data"]
+        original = entry["original_message"]
+
+        if str(reaction.emoji) == "✅":
+            await self._process_submission(original, data, reviewer=user)
+            await original.add_reaction("✅")
+
+            embed = discord.Embed(
+                title="✅ Approved",
+                description=f"Approved by {user.mention}",
+                color=discord.Color.green(),
+            )
+
+        elif str(reaction.emoji) == "❌":
+            await original.add_reaction("❌")
+            embed = discord.Embed(
+                title="❌ Denied",
+                description=f"Denied by {user.mention}",
+                color=discord.Color.red(),
+            )
+
+        else:
+            return
+
+        await msg.edit(embed=embed)
+        await msg.delete(delay=8)
 
     # ────────────────────────
     # Processing
@@ -177,26 +221,20 @@ class XPReporterCog(commands.Cog):
 
         gains = [f"{final_xp} XP"]
 
-        # 🧌 Troll Mission Rewards
         if data["progression_key"] == "troll mission":
             final_crowns = math.floor(
                 BASE_CROWNS * (1 + data["crowns_boost"])
             )
-            rift_tokens = tier["tier"]
-
             gains.append(f"{final_crowns} Crowns")
-            gains.append(f"{rift_tokens} Rift Token{'s' if rift_tokens > 1 else ''}")
+            gains.append(f"{tier['tier']} Rift Token(s)")
 
-        try:
-            idx = INPUT_CHANNEL_IDS.index(data["channel"].id)
-            output_channel = self.bot.get_channel(OUTPUT_CHANNEL_IDS[idx])
-        except Exception:
-            output_channel = data["channel"]
+        idx = INPUT_CHANNEL_IDS.index(data["channel"].id)
+        output = self.bot.get_channel(OUTPUT_CHANNEL_IDS[idx])
 
         embed = discord.Embed(
             title="✅ Progression Logged",
             description=f"Submitted by {data['author'].mention}",
-            color=discord.Color.green()
+            color=discord.Color.green(),
         )
         embed.add_field(name="Character(s)", value=data["name"], inline=True)
         embed.add_field(name="Level", value=data["level"], inline=True)
@@ -204,18 +242,16 @@ class XPReporterCog(commands.Cog):
         embed.add_field(
             name=f"{EMOJI_STR1} Total Gains",
             value=f"**{', '.join(gains)}**",
-            inline=False
+            inline=False,
         )
 
         if reviewer:
             embed.set_footer(text=f"Approved by {reviewer.display_name}")
 
-        await output_channel.send(embed=embed)
-        await message.add_reaction("✅")
+        await output.send(embed=embed)
 
 # ────────────────────────
 # Setup
 # ────────────────────────
 async def setup(bot):
     await bot.add_cog(XPReporterCog(bot))
-
