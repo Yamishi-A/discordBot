@@ -1,5 +1,5 @@
 # xp_reporter_main.py
-# FINAL – Manual Review System (FIXED, CLEAN, MOD-LOGGED)
+# FINAL – Manual Review System (AUTO + MANUAL FIXED)
 
 import discord
 import re
@@ -124,12 +124,12 @@ class XPReporterCog(commands.Cog):
 
         activity = data["progression_key"]
 
-        # Auto-processed
+        # AUTO PROCESS
         if activity in ACTIVITY_MULTIPLIERS:
             await self._process_submission(message, data)
             return
 
-        # Manual review
+        # MANUAL REVIEW
         if any(k in activity for k in REVIEW_KEYWORDS):
             await message.add_reaction("❓")
 
@@ -192,12 +192,12 @@ class XPReporterCog(commands.Cog):
 
         elif str(reaction.emoji) == "❌":
             await original.add_reaction("❌")
+
             embed = discord.Embed(
                 title="❌ Denied",
                 description=f"Denied by {user.mention}",
                 color=discord.Color.red(),
             )
-
         else:
             return
 
@@ -249,6 +249,10 @@ class XPReporterCog(commands.Cog):
             embed.set_footer(text=f"Approved by {reviewer.display_name}")
 
         await output.send(embed=embed)
+
+        # ✅ AUTO-APPROVAL REACTION (FIX)
+        if reviewer is None:
+            await message.add_reaction("✅")
 
 # ────────────────────────
 # Setup
