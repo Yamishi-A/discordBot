@@ -1,5 +1,6 @@
 # xp_reporter_main.py
 # FINAL – Manual Review System (AUTO + MANUAL FIXED)
+# Modified to restrict AFK Farm to role 1362546920890827053
 
 import discord
 import re
@@ -13,6 +14,9 @@ from bot_config import (
 
 EMOJI_STR1 = "⭐"
 BASE_CROWNS = 500
+
+# Role allowed to perform AFK Farm
+AFK_ALLOWED_ROLE_ID = 1362546920890827053
 
 # ────────────────────────
 # Training Tiers
@@ -123,6 +127,15 @@ class XPReporterCog(commands.Cog):
             return
 
         activity = data["progression_key"]
+
+        # Restrict AFK farm to specific role
+        afk_keys = {"afk training i", "afk training ii", "afk training iii"}
+        if activity in afk_keys:
+            author_role_ids = {r.id for r in message.author.roles}
+            if AFK_ALLOWED_ROLE_ID not in author_role_ids:
+                # Not allowed to submit AFK farm/training
+                await message.add_reaction("❌")
+                return
 
         # AUTO PROCESS
         if activity in ACTIVITY_MULTIPLIERS:
