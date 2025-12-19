@@ -8,8 +8,14 @@ import sqlite3
 import random
 import time
 import typing
+import logging
+import traceback
 
 from bot_config import DB_NAME, GACHA_CHANNEL_ID, MODERATOR_ROLE_IDS
+
+# Basic logger so exceptions are visible in console
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("gacha")
 
 # =====================================================
 # CONFIG (tweakable)
@@ -42,8 +48,8 @@ LOOT_TABLE = {
         "10% XP Multiplier Token (1 Week)",
         "250 XP Crystal",
         "10,000 Crowns",
-        "The Einherjar's Edge",
-        "The Einherjar's Hauberk"
+        "The Einherjar’s Edge",
+        "The Einherjar’s Hauberk"
     ],
     5: [
         "Exalted Grade Item",
@@ -118,18 +124,26 @@ def get_pity(user_id: int) -> dict:
         return {"pity_5": row[0], "pity_4": row[1], "total": row[2], "total_5": row[3]}
 
 def save_pity(user_id: int, pity_5: int, pity_4: int, total: int, total_5: int):
-    """Upsert the user's pity counters and totals."""
-    with db() as conn:
-        conn.execute("""
-            INSERT INTO pity (user_id, pity_5_star, pity_4_star, total_pulls, total_5_stars)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET
-                pity_5_star = excluded.pity_5_star,
-                pity_4_star = excluded.pity_4_star,
-                total_pulls = excluded.total_pulls,
-                total_5_stars = excluded.total_5_stars
-        """, (user_id, pity_5, pity_4, total, total_5))
-        conn.commit()
+    """Upsert the user's pity counters and totals in a SQLite-compatible way."""
+    try:
+        with db() as conn:
+            cur = conn.cursor()
+            # Try a simple UPDATE first
+            cur.execute("""
+                UPDATE pity
+                SET pity_5_star = ?, pity_4_star = ?, total_pulls = ?, total_5_stars = ?
+                WHERE user_id = ?
+            """, (pity_5, pity_4, total, total_5, user_id))
+            if cur.rowcount == 0:
+                # row didn't exist, do an insert
+                cur.execute("""
+                    INSERT INTO pity (user_id, pity_5_star, pity_4_star, total_pulls, total_5_stars)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (user_id, pity_5, pity_4, total, total_5))
+            conn.commit()
+    except Exception:
+        logger.error("Failed to save pity for user %s:\n%s", user_id, traceback.format_exc())
+        # Do not re-raise — we prefer to continue and let the caller handle user-notification.
 
 # =====================================================
 # INVENTORY / HISTORY
@@ -137,7 +151,8 @@ def save_pity(user_id: int, pity_5: int, pity_4: int, total: int, total_5: int):
 
 def add_inventory(user_id: int, item: str):
     with db() as conn:
-        conn.execute("""
+        cur = conn.cursor()
+        cur.execute("""
             INSERT INTO inventory (user_id, item_name, quantity)
             VALUES (?, ?, 1)
             ON CONFLICT(user_id, item_name) DO UPDATE SET quantity = quantity + 1
@@ -176,12 +191,15 @@ def get_inventory(user_id: int):
         ).fetchall()
 
 def log_history(user_id: int, item: str, rarity: int):
-    with db() as conn:
-        conn.execute("""
-            INSERT INTO pull_history (user_id, item_name, rarity, timestamp)
-            VALUES (?, ?, ?, ?)
-        """, (user_id, item, rarity, int(time.time())))
-        conn.commit()
+    try:
+        with db() as conn:
+            conn.execute("""
+                INSERT INTO pull_history (user_id, item_name, rarity, timestamp)
+                VALUES (?, ?, ?, ?)
+            """, (user_id, item, rarity, int(time.time())))
+            conn.commit()
+    except Exception:
+        logger.error("Failed to log history for user %s:\n%s", user_id, traceback.format_exc())
 
 def get_history(user_id: int, limit=20):
     with db() as conn:
@@ -255,8 +273,7 @@ def single_pull(state: dict):
 
     return rarity, item
 
-def do_wish(user: typing.Union[discord.User, discord.Member], amount: int):
-    """Perform wishes and return results synchronously"""
+async def do_wish(user: typing.Union[discord.User, discord.Member], amount: int):
     # validate amount
     amount = max(1, min(amount, MAX_WISHES_AT_ONCE))
     state = get_pity(user.id)
@@ -265,10 +282,14 @@ def do_wish(user: typing.Union[discord.User, discord.Member], amount: int):
     for _ in range(amount):
         rarity, item = single_pull(state)
         results[rarity].append(item)
-        add_inventory(user.id, item)
-        log_history(user.id, item, rarity)
+        try:
+            add_inventory(user.id, item)
+            log_history(user.id, item, rarity)
+        except Exception:
+            # If inventory/history fails, log it but continue — avoid crashing the whole wish.
+            logger.error("Inventory/history error for user %s: %s", user.id, traceback.format_exc())
 
-    # Save updated pity and totals
+    # Save updated pity and totals (safe save)
     save_pity(user.id, state["pity_5"], state["pity_4"], state["total"], state["total_5"])
     return results, state
 
@@ -287,7 +308,7 @@ def wish_embed(user, amount, results, state):
                 desc.append(f"> **{item}**")
 
     embed = discord.Embed(
-        title=f"💫 {user.display_name}'s {amount} Wish Results",
+        title=f"💫 {getattr(user, 'display_name', getattr(user, 'name', 'Player'))}'s {amount} Wish Results",
         description="\n".join(desc) if desc else "No results (this shouldn't happen).",
         color=RARITY_COLOR.get(highest, 0xFFFFFF)
     )
@@ -297,9 +318,18 @@ def wish_embed(user, amount, results, state):
         text=f"Pity: {state['pity_5']}/{HARD_PITY_5} • Guaranteed in {remaining} pulls"
     )
     try:
-        embed.set_thumbnail(url=user.avatar.url if user.avatar else None)
+        # some gateway users may not have avatar property; guard it
+        avatar_url = None
+        if hasattr(user, "avatar") and getattr(user, "avatar"):
+            # discord.py Member/User avatar objects can be None or have .url
+            try:
+                avatar_url = user.avatar.url
+            except Exception:
+                avatar_url = None
+        if avatar_url:
+            embed.set_thumbnail(url=avatar_url)
     except Exception:
-        # some gateway users may not have avatar property; ignore safely
+        # ignore safely
         pass
     return embed
 
@@ -320,13 +350,27 @@ class GachaCog(commands.Cog):
 
         # clamp amount server-side for safety
         amount = max(1, min(amount, MAX_WISHES_AT_ONCE))
+
+        # Defer early to give us time for DB/processing.
+        # If anything goes wrong after this, we'll respond via followup so the user doesn't get stuck.
         await interaction.response.defer()
-        
+
         try:
-            results, state = do_wish(interaction.user, amount)
-            await interaction.followup.send(embed=wish_embed(interaction.user, amount, results, state))
+            results, state = await do_wish(interaction.user, amount)
+            embed = wish_embed(interaction.user, amount, results, state)
+            await interaction.followup.send(embed=embed)
         except Exception as e:
-            await interaction.followup.send(f"An error occurred: {str(e)}", ephemeral=True)
+            # Log the traceback and inform the user instead of leaving them with the thinking state
+            logger.error("Error handling /wish: %s\n%s", e, traceback.format_exc())
+            # If followup fails too, try to use a non-deferred response (last resort)
+            try:
+                await interaction.followup.send(content="❌ An error occurred while processing your wish. The error has been logged.", ephemeral=True)
+            except Exception:
+                # final fallback: try to send a direct ephemeral response (this will raise if already responded/deferred in certain ways)
+                try:
+                    await interaction.response.send_message("❌ An error occurred while processing your wish. The error has been logged.", ephemeral=True)
+                except Exception:
+                    logger.error("Failed to notify user after wish error: %s", traceback.format_exc())
 
     # -------- WISH (text command) --------
     @commands.command(name="wish")
@@ -334,12 +378,12 @@ class GachaCog(commands.Cog):
         if ctx.channel.id != GACHA_CHANNEL_ID:
             return await ctx.send("Wrong channel.")
         amount = max(1, min(amount, MAX_WISHES_AT_ONCE))
-        
         try:
-            results, state = do_wish(ctx.author, amount)
+            results, state = await do_wish(ctx.author, amount)
             await ctx.send(embed=wish_embed(ctx.author, amount, results, state))
-        except Exception as e:
-            await ctx.send(f"An error occurred: {str(e)}")
+        except Exception:
+            logger.error("Error handling text !wish: %s", traceback.format_exc())
+            await ctx.send("❌ An error occurred while processing your wish. Check the bot logs.")
 
     # -------- PITY --------
     @app_commands.command(name="pity", description="Check your 5★ pity and total pulls")
