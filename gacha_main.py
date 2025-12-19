@@ -1,6 +1,7 @@
-# gacha_main.py — FULL GENSHIN-STYLE GACHA SYSTEM (CLEAN & STABLE)
+# gacha_main.py — FULL GENSHIN-STYLE GACHA SYSTEM (AUTO-MIGRATING, ROBUST)
 # Drop in, copy/paste. Assumes bot_config provides DB_NAME, GACHA_CHANNEL_ID, MODERATOR_ROLE_IDS.
 
+import sys
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -13,26 +14,30 @@ import traceback
 
 from bot_config import DB_NAME, GACHA_CHANNEL_ID, MODERATOR_ROLE_IDS
 
-# Basic logger so exceptions are visible in console
+# -------------------------
+# Logging & runtime notice
+# -------------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("gacha")
+
+if sys.version_info >= (3, 13):
+    logger.warning("Running on Python %s — discord.py compatibility with 3.13 is not guaranteed. "
+                   "Pin to Python 3.11 if you see interaction issues.", ".".join(map(str, sys.version_info[:3])))
 
 # =====================================================
 # CONFIG (tweakable)
 # =====================================================
-
 RATE_5_STAR = 0.006
 RATE_4_STAR = 0.05
 
 HARD_PITY_5 = 60         # guaranteed 5★ at this pull
 SPECIAL_30_CHANCE = 0.5  # at pull 30 there's a 50% chance to upgrade to 5★; if it fails, guarantee a 4★
 
-MAX_WISHES_AT_ONCE = 10  # validate amount
+MAX_WISHES_AT_ONCE = 10  # server-side clamp
 
 # =====================================================
 # LOOT TABLE
 # =====================================================
-
 LOOT_TABLE = {
     3: [
         "Rusted Seax",
@@ -48,8 +53,8 @@ LOOT_TABLE = {
         "10% XP Multiplier Token (1 Week)",
         "250 XP Crystal",
         "10,000 Crowns",
-        "The Einherjar’s Edge",
-        "The Einherjar’s Hauberk"
+        "The Einherjars Edge",
+        "The Einherjars Hauberk"
     ],
     5: [
         "Exalted Grade Item",
@@ -63,27 +68,37 @@ RARITY_EMOJI = {3: "▪️", 4: "🔸", 5: "🌟"}
 RARITY_COLOR = {3: 0x90EE90, 4: 0xADD8E6, 5: 0xFFD700}
 
 # =====================================================
-# DATABASE HELPERS / INITIALIZER
+# DATABASE HELPERS / MIGRATION
 # =====================================================
-
 def db():
-    # Always open a fresh connection; check_same_thread False reduces thread errors for async bots.
+    # Fresh connection each call reduces cross-thread issues. Caller must close via context manager.
     return sqlite3.connect(DB_NAME, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES, check_same_thread=False)
 
+def _get_table_columns(conn: sqlite3.Connection, table: str) -> set:
+    cur = conn.cursor()
+    cur.execute(f"PRAGMA table_info('{table}')")
+    rows = cur.fetchall()
+    return {row[1] for row in rows}  # row[1] is column name
+
 def init_db():
-    """Create tables if they don't exist. Call at cog init."""
+    """
+    - Create tables if missing.
+    - Add missing columns (safe migrations) so old DBs don't crash.
+    This is idempotent and safe to run at each cog load.
+    """
     with db() as conn:
         cur = conn.cursor()
-        # pity: track both 5★ pity, 4★ pity, total pulls, and total_5_stars for leaderboards
+
+        # Create base tables (if missing)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS pity (
                 user_id INTEGER PRIMARY KEY,
                 pity_5_star INTEGER NOT NULL DEFAULT 0,
                 pity_4_star INTEGER NOT NULL DEFAULT 0,
-                total_pulls INTEGER NOT NULL DEFAULT 0,
-                total_5_stars INTEGER NOT NULL DEFAULT 0
+                total_pulls INTEGER NOT NULL DEFAULT 0
             )
         """)
+
         cur.execute("""
             CREATE TABLE IF NOT EXISTS inventory (
                 user_id INTEGER,
@@ -92,6 +107,7 @@ def init_db():
                 PRIMARY KEY (user_id, item_name)
             )
         """)
+
         cur.execute("""
             CREATE TABLE IF NOT EXISTS pull_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -103,145 +119,136 @@ def init_db():
         """)
         conn.commit()
 
+        # Migrate pity table: add total_5_stars if missing
+        try:
+            cols = _get_table_columns(conn, "pity")
+            if "total_5_stars" not in cols:
+                logger.info("Adding missing column 'total_5_stars' to 'pity' table (migration).")
+                cur.execute("ALTER TABLE pity ADD COLUMN total_5_stars INTEGER NOT NULL DEFAULT 0")
+                conn.commit()
+        except Exception:
+            logger.error("Error running migrations on 'pity':\n%s", traceback.format_exc())
+
 # =====================================================
 # PITY / STATE FUNCTIONS
 # =====================================================
-
 def get_pity(user_id: int) -> dict:
-    """Return a dict with pity_5, pity_4, total, total_5. Ensures a row exists."""
+    """
+    Returns a dictionary with keys: pity_5, pity_4, total, total_5
+    Ensures a row exists (inserts default row if not).
+    """
+    # Ensure DB and columns exist
+    init_db()
     with db() as conn:
         cur = conn.cursor()
-        cur.execute("SELECT pity_5_star, pity_4_star, total_pulls, total_5_stars FROM pity WHERE user_id = ?", (user_id,))
-        row = cur.fetchone()
-        if not row:
-            # Insert a default row to ensure persistence & avoid race conditions elsewhere
-            cur.execute(
-                "INSERT INTO pity (user_id, pity_5_star, pity_4_star, total_pulls, total_5_stars) VALUES (?, 0, 0, 0, 0)",
-                (user_id,)
-            )
-            conn.commit()
-            return {"pity_5": 0, "pity_4": 0, "total": 0, "total_5": 0}
-        return {"pity_5": row[0], "pity_4": row[1], "total": row[2], "total_5": row[3]}
+        # Defensive select: if total_5_stars doesn't exist, fetch what's available and default the rest
+        try:
+            cur.execute("SELECT pity_5_star, pity_4_star, total_pulls, total_5_stars FROM pity WHERE user_id = ?", (user_id,))
+            row = cur.fetchone()
+            if not row:
+                # Insert default row
+                cur.execute("INSERT INTO pity (user_id, pity_5_star, pity_4_star, total_pulls, total_5_stars) VALUES (?, 0, 0, 0, 0)", (user_id,))
+                conn.commit()
+                return {"pity_5": 0, "pity_4": 0, "total": 0, "total_5": 0}
+            # If the row doesn't contain total_5_stars (older schema), handle by padding
+            if len(row) < 4:
+                vals = list(row) + [0] * (4 - len(row))
+            else:
+                vals = list(row)
+            return {"pity_5": vals[0], "pity_4": vals[1], "total": vals[2], "total_5": vals[3]}
+        except sqlite3.OperationalError:
+            # Fallback in case columns differ: try select whatever we can
+            cur.execute("SELECT pity_5_star, pity_4_star, total_pulls FROM pity WHERE user_id = ?", (user_id,))
+            row = cur.fetchone()
+            if not row:
+                cur.execute("INSERT INTO pity (user_id, pity_5_star, pity_4_star, total_pulls) VALUES (?, 0, 0, 0)", (user_id,))
+                conn.commit()
+                return {"pity_5": 0, "pity_4": 0, "total": 0, "total_5": 0}
+            vals = list(row) + [0]
+            return {"pity_5": vals[0], "pity_4": vals[1], "total": vals[2], "total_5": vals[3]}
 
 def save_pity(user_id: int, pity_5: int, pity_4: int, total: int, total_5: int):
-    """Upsert the user's pity counters and totals in a SQLite-compatible way."""
+    """
+    Upsert user's pity row robustly.
+    Using REPLACE INTO is safe here because user_id is primary key.
+    """
     try:
         with db() as conn:
             cur = conn.cursor()
-            # Try a simple UPDATE first
+            # REPLACE will insert or delete+insert the row; this is acceptable for a counters table.
             cur.execute("""
-                UPDATE pity
-                SET pity_5_star = ?, pity_4_star = ?, total_pulls = ?, total_5_stars = ?
-                WHERE user_id = ?
-            """, (pity_5, pity_4, total, total_5, user_id))
-            if cur.rowcount == 0:
-                # row didn't exist, do an insert
-                cur.execute("""
-                    INSERT INTO pity (user_id, pity_5_star, pity_4_star, total_pulls, total_5_stars)
-                    VALUES (?, ?, ?, ?, ?)
-                """, (user_id, pity_5, pity_4, total, total_5))
+                REPLACE INTO pity (user_id, pity_5_star, pity_4_star, total_pulls, total_5_stars)
+                VALUES (?, ?, ?, ?, ?)
+            """, (user_id, pity_5, pity_4, total, total_5))
             conn.commit()
     except Exception:
         logger.error("Failed to save pity for user %s:\n%s", user_id, traceback.format_exc())
-        # Do not re-raise — we prefer to continue and let the caller handle user-notification.
 
 # =====================================================
 # INVENTORY / HISTORY
 # =====================================================
-
 def add_inventory(user_id: int, item: str):
-    with db() as conn:
-        cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO inventory (user_id, item_name, quantity)
-            VALUES (?, ?, 1)
-            ON CONFLICT(user_id, item_name) DO UPDATE SET quantity = quantity + 1
-        """, (user_id, item))
-        conn.commit()
+    try:
+        with db() as conn:
+            cur = conn.cursor()
+            # Update then insert fallback (works across SQLite versions)
+            cur.execute("UPDATE inventory SET quantity = quantity + 1 WHERE user_id = ? AND item_name = ?", (user_id, item))
+            if cur.rowcount == 0:
+                cur.execute("INSERT INTO inventory (user_id, item_name, quantity) VALUES (?, ?, 1)", (user_id, item))
+            conn.commit()
+    except Exception:
+        logger.error("Failed to add inventory for user %s: %s", user_id, traceback.format_exc())
 
 def remove_inventory(user_id: int, item: str) -> bool:
     with db() as conn:
         cur = conn.cursor()
-        cur.execute(
-            "SELECT quantity FROM inventory WHERE user_id = ? AND item_name = ?",
-            (user_id, item)
-        )
+        cur.execute("SELECT quantity FROM inventory WHERE user_id = ? AND item_name = ?", (user_id, item))
         row = cur.fetchone()
         if not row:
             return False
-
         if row[0] <= 1:
-            cur.execute(
-                "DELETE FROM inventory WHERE user_id = ? AND item_name = ?",
-                (user_id, item)
-            )
+            cur.execute("DELETE FROM inventory WHERE user_id = ? AND item_name = ?", (user_id, item))
         else:
-            cur.execute(
-                "UPDATE inventory SET quantity = quantity - 1 WHERE user_id = ? AND item_name = ?",
-                (user_id, item)
-            )
+            cur.execute("UPDATE inventory SET quantity = quantity - 1 WHERE user_id = ? AND item_name = ?", (user_id, item))
         conn.commit()
         return True
 
 def get_inventory(user_id: int):
     with db() as conn:
-        return conn.execute(
-            "SELECT item_name, quantity FROM inventory WHERE user_id = ? ORDER BY quantity DESC",
-            (user_id,)
-        ).fetchall()
+        return conn.execute("SELECT item_name, quantity FROM inventory WHERE user_id = ? ORDER BY quantity DESC", (user_id,)).fetchall()
 
 def log_history(user_id: int, item: str, rarity: int):
     try:
         with db() as conn:
-            conn.execute("""
-                INSERT INTO pull_history (user_id, item_name, rarity, timestamp)
-                VALUES (?, ?, ?, ?)
-            """, (user_id, item, rarity, int(time.time())))
+            conn.execute("INSERT INTO pull_history (user_id, item_name, rarity, timestamp) VALUES (?, ?, ?, ?)",
+                         (user_id, item, rarity, int(time.time())))
             conn.commit()
     except Exception:
         logger.error("Failed to log history for user %s:\n%s", user_id, traceback.format_exc())
 
 def get_history(user_id: int, limit=20):
     with db() as conn:
-        return conn.execute("""
-            SELECT item_name, rarity, timestamp
-            FROM pull_history
-            WHERE user_id = ?
-            ORDER BY timestamp DESC
-            LIMIT ?
-        """, (user_id, limit)).fetchall()
+        return conn.execute("SELECT item_name, rarity, timestamp FROM pull_history WHERE user_id = ? ORDER BY timestamp DESC LIMIT ?", (user_id, limit)).fetchall()
 
 # =====================================================
-# GACHA LOGIC (FIXED)
+# GACHA LOGIC
 # =====================================================
-
 def roll_rarity(state: dict) -> int:
-    """
-    Determine rarity according to:
-     - HARD_PITY_5 guaranteed 5★
-     - special chance at 30th pull (if configured)
-     - 4★ guaranteed every 10 pulls (tracked by pity_4)
-     - otherwise normal rates
-    """
     pity_5 = state["pity_5"]
     pity_4 = state["pity_4"]
 
-    # HARD pity for 5★ (guaranteed)
+    # Hard pity
     if pity_5 >= HARD_PITY_5:
         return 5
 
-    # Special 30th pull behaviour: either upgrade to 5★ or fallback to guaranteed 4★
+    # special 30th behaviour
     if pity_5 == 30:
-        if random.random() < SPECIAL_30_CHANCE:
-            return 5
-        else:
-            return 4
+        return 5 if random.random() < SPECIAL_30_CHANCE else 4
 
-    # 4★ guarantee (every 10 pulls without 4/5): using pity_4 counter
+    # 4* guarantee
     if pity_4 >= 10:
         return 4
 
-    # Normal random roll
     r = random.random()
     if r < RATE_5_STAR:
         return 5
@@ -250,23 +257,18 @@ def roll_rarity(state: dict) -> int:
     return 3
 
 def single_pull(state: dict):
-    """
-    state is a dict returned by get_pity with keys: pity_5, pity_4, total, total_5
-    We increment counters BEFORE the roll to match typical gacha counting (pull 1 increments from 0->1).
-    """
-    # increment counters
+    # increment counters before roll (matches many gacha designs)
     state["pity_5"] += 1
     state["pity_4"] += 1
     state["total"] += 1
 
     rarity = roll_rarity(state)
-    # choose an item from the rarity pool
     item = random.choice(LOOT_TABLE[rarity])
 
-    # Apply resets and bookkeeping
+    # reset appropriate pity counters
     if rarity == 5:
         state["pity_5"] = 0
-        state["pity_4"] = 0  # 5★ also resets the 4★ pity
+        state["pity_4"] = 0
         state["total_5"] += 1
     elif rarity == 4:
         state["pity_4"] = 0
@@ -274,7 +276,6 @@ def single_pull(state: dict):
     return rarity, item
 
 async def do_wish(user: typing.Union[discord.User, discord.Member], amount: int):
-    # validate amount
     amount = max(1, min(amount, MAX_WISHES_AT_ONCE))
     state = get_pity(user.id)
     results = {3: [], 4: [], 5: []}
@@ -282,46 +283,48 @@ async def do_wish(user: typing.Union[discord.User, discord.Member], amount: int)
     for _ in range(amount):
         rarity, item = single_pull(state)
         results[rarity].append(item)
+        # Best effort: don't let DB hiccups crash the whole command
         try:
             add_inventory(user.id, item)
             log_history(user.id, item, rarity)
         except Exception:
-            # If inventory/history fails, log it but continue — avoid crashing the whole wish.
-            logger.error("Inventory/history error for user %s: %s", user.id, traceback.format_exc())
+            logger.error("Inventory/history error while doing wish for %s:\n%s", user.id, traceback.format_exc())
 
-    # Save updated pity and totals (safe save)
+    # Save updated pity and totals
     save_pity(user.id, state["pity_5"], state["pity_4"], state["total"], state["total_5"])
     return results, state
 
 # =====================================================
-# EMBEDS
+# EMBED BUILDERS
 # =====================================================
-
 def wish_embed(user, amount, results, state):
-    highest = max((r for r in results if results[r]), default=3)
-
-    desc = []
+    # Determine highest rarity obtained in this pull
+    highest = 3
     for r in (5, 4, 3):
         if results[r]:
-            desc.append(f"### {RARITY_EMOJI[r]} {r}-Star")
-            for item in results[r]:
-                desc.append(f"> **{item}**")
+            highest = r
+            break
+
+    desc_lines = []
+    for r in (5, 4, 3):
+        if results[r]:
+            desc_lines.append(f"### {RARITY_EMOJI[r]} {r}-Star")
+            for it in results[r]:
+                desc_lines.append(f"> **{it}**")
 
     embed = discord.Embed(
         title=f"💫 {getattr(user, 'display_name', getattr(user, 'name', 'Player'))}'s {amount} Wish Results",
-        description="\n".join(desc) if desc else "No results (this shouldn't happen).",
+        description="\n".join(desc_lines) if desc_lines else "No results (this shouldn't happen).",
         color=RARITY_COLOR.get(highest, 0xFFFFFF)
     )
 
     remaining = max(0, HARD_PITY_5 - state["pity_5"])
-    embed.set_footer(
-        text=f"Pity: {state['pity_5']}/{HARD_PITY_5} • Guaranteed in {remaining} pulls"
-    )
+    embed.set_footer(text=f"Pity: {state['pity_5']}/{HARD_PITY_5} • Guaranteed in {remaining} pulls • Total 5★: {state['total_5']}")
+
+    # Safe avatar handling
     try:
-        # some gateway users may not have avatar property; guard it
         avatar_url = None
         if hasattr(user, "avatar") and getattr(user, "avatar"):
-            # discord.py Member/User avatar objects can be None or have .url
             try:
                 avatar_url = user.avatar.url
             except Exception:
@@ -329,30 +332,28 @@ def wish_embed(user, amount, results, state):
         if avatar_url:
             embed.set_thumbnail(url=avatar_url)
     except Exception:
-        # ignore safely
         pass
+
     return embed
 
 # =====================================================
 # COG
 # =====================================================
-
 class GachaCog(commands.Cog):
-    def __init__(self, bot):
+    def __init__(self, bot: commands.Bot):
         self.bot = bot
         init_db()  # ensure DB/tables exist on cog load
 
     # -------- WISH (slash) --------
     @app_commands.command(name="wish", description="Perform gacha pulls (1-10)")
     async def slash_wish(self, interaction: discord.Interaction, amount: int = 1):
+        # channel restriction
         if interaction.channel_id != GACHA_CHANNEL_ID:
             return await interaction.response.send_message("Wrong channel.", ephemeral=True)
 
-        # clamp amount server-side for safety
         amount = max(1, min(amount, MAX_WISHES_AT_ONCE))
 
-        # Defer early to give us time for DB/processing.
-        # If anything goes wrong after this, we'll respond via followup so the user doesn't get stuck.
+        # defer to allow longer ops
         await interaction.response.defer()
 
         try:
@@ -360,13 +361,11 @@ class GachaCog(commands.Cog):
             embed = wish_embed(interaction.user, amount, results, state)
             await interaction.followup.send(embed=embed)
         except Exception as e:
-            # Log the traceback and inform the user instead of leaving them with the thinking state
             logger.error("Error handling /wish: %s\n%s", e, traceback.format_exc())
-            # If followup fails too, try to use a non-deferred response (last resort)
+            # try to notify user gracefully
             try:
                 await interaction.followup.send(content="❌ An error occurred while processing your wish. The error has been logged.", ephemeral=True)
             except Exception:
-                # final fallback: try to send a direct ephemeral response (this will raise if already responded/deferred in certain ways)
                 try:
                     await interaction.response.send_message("❌ An error occurred while processing your wish. The error has been logged.", ephemeral=True)
                 except Exception:
@@ -374,7 +373,7 @@ class GachaCog(commands.Cog):
 
     # -------- WISH (text command) --------
     @commands.command(name="wish")
-    async def text_wish(self, ctx, amount: int = 1):
+    async def text_wish(self, ctx: commands.Context, amount: int = 1):
         if ctx.channel.id != GACHA_CHANNEL_ID:
             return await ctx.send("Wrong channel.")
         amount = max(1, min(amount, MAX_WISHES_AT_ONCE))
@@ -454,7 +453,6 @@ class GachaCog(commands.Cog):
         if pity < 0 or total < 0:
             return await interaction.response.send_message("❌ Pity and total pulls must be 0 or higher.", ephemeral=True)
 
-        # Fetch current total_5 to preserve unless explicitly changed (we don't have a param for it)
         current = get_pity(member.id)
         save_pity(member.id, pity, current["pity_4"], total, current["total_5"])
         await interaction.response.send_message(f"✅ {member.display_name}'s pity set to {pity} and total pulls to {total}.", ephemeral=True)
@@ -477,14 +475,14 @@ class GachaCog(commands.Cog):
         else:
             for idx, (uid, pulls) in enumerate(rows, 1):
                 user = self.bot.get_user(uid)
-                name = user.display_name if user else f"User {uid}"
+                name = getattr(user, "display_name", f"User {uid}") if user else f"User {uid}"
                 embed.add_field(name=f"{idx}. {name}", value=f"{pulls} 5★ pulls", inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     # -------- TOP 5★ USERS (alias) --------
     @app_commands.command(name="top5stars", description="Users with the most 5★ pulls")
     async def slash_top5stars(self, interaction: discord.Interaction):
-        await self.slash_leaderboard(interaction)  # Alias to leaderboard
+        await self.slash_leaderboard(interaction)  # Alias
 
     # -------- BANNER --------
     @app_commands.command(name="banner", description="See current banner info")
@@ -494,7 +492,7 @@ class GachaCog(commands.Cog):
         embed.add_field(name="Featured 4★ Items", value="\n".join(LOOT_TABLE[4]), inline=False)
         embed.add_field(name="5★ Rate", value=f"{RATE_5_STAR*100:.2f}%")
         embed.add_field(name="4★ Rate", value=f"{RATE_4_STAR*100:.2f}%")
-        embed.add_field(name="Pity", value=f"Hard pity at {HARD_PITY_5} pulls\n30th pull {int(SPECIAL_30_CHANCE*100)}% chance for 5★ else 4★", inline=False)
+        embed.add_field(name="Pity", value=f"Hard pity at {HARD_PITY_5} pulls\n30th pull {int(SPECIAL_30_CHANCE*100)}% chance for 5★ else 4★\n4★ guarantee every 10 pulls without 4/5", inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     # -------- RATES --------
@@ -510,6 +508,5 @@ class GachaCog(commands.Cog):
 # =====================================================
 # SETUP
 # =====================================================
-
-async def setup(bot):
+async def setup(bot: commands.Bot):
     await bot.add_cog(GachaCog(bot))
