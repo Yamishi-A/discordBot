@@ -42,8 +42,8 @@ LOOT_TABLE = {
         "10% XP Multiplier Token (1 Week)",
         "250 XP Crystal",
         "10,000 Crowns",
-        "The Einherjar’s Edge",
-        "The Einherjar’s Hauberk"
+        "The Einherjar's Edge",
+        "The Einherjar's Hauberk"
     ],
     5: [
         "Exalted Grade Item",
@@ -129,6 +129,7 @@ def save_pity(user_id: int, pity_5: int, pity_4: int, total: int, total_5: int):
                 total_pulls = excluded.total_pulls,
                 total_5_stars = excluded.total_5_stars
         """, (user_id, pity_5, pity_4, total, total_5))
+        conn.commit()
 
 # =====================================================
 # INVENTORY / HISTORY
@@ -141,6 +142,7 @@ def add_inventory(user_id: int, item: str):
             VALUES (?, ?, 1)
             ON CONFLICT(user_id, item_name) DO UPDATE SET quantity = quantity + 1
         """, (user_id, item))
+        conn.commit()
 
 def remove_inventory(user_id: int, item: str) -> bool:
     with db() as conn:
@@ -179,6 +181,7 @@ def log_history(user_id: int, item: str, rarity: int):
             INSERT INTO pull_history (user_id, item_name, rarity, timestamp)
             VALUES (?, ?, ?, ?)
         """, (user_id, item, rarity, int(time.time())))
+        conn.commit()
 
 def get_history(user_id: int, limit=20):
     with db() as conn:
@@ -252,7 +255,8 @@ def single_pull(state: dict):
 
     return rarity, item
 
-async def do_wish(user: typing.Union[discord.User, discord.Member], amount: int):
+def do_wish(user: typing.Union[discord.User, discord.Member], amount: int):
+    """Perform wishes and return results synchronously"""
     # validate amount
     amount = max(1, min(amount, MAX_WISHES_AT_ONCE))
     state = get_pity(user.id)
@@ -317,8 +321,12 @@ class GachaCog(commands.Cog):
         # clamp amount server-side for safety
         amount = max(1, min(amount, MAX_WISHES_AT_ONCE))
         await interaction.response.defer()
-        results, state = await do_wish(interaction.user, amount)
-        await interaction.followup.send(embed=wish_embed(interaction.user, amount, results, state))
+        
+        try:
+            results, state = do_wish(interaction.user, amount)
+            await interaction.followup.send(embed=wish_embed(interaction.user, amount, results, state))
+        except Exception as e:
+            await interaction.followup.send(f"An error occurred: {str(e)}", ephemeral=True)
 
     # -------- WISH (text command) --------
     @commands.command(name="wish")
@@ -326,8 +334,12 @@ class GachaCog(commands.Cog):
         if ctx.channel.id != GACHA_CHANNEL_ID:
             return await ctx.send("Wrong channel.")
         amount = max(1, min(amount, MAX_WISHES_AT_ONCE))
-        results, state = await do_wish(ctx.author, amount)
-        await ctx.send(embed=wish_embed(ctx.author, amount, results, state))
+        
+        try:
+            results, state = do_wish(ctx.author, amount)
+            await ctx.send(embed=wish_embed(ctx.author, amount, results, state))
+        except Exception as e:
+            await ctx.send(f"An error occurred: {str(e)}")
 
     # -------- PITY --------
     @app_commands.command(name="pity", description="Check your 5★ pity and total pulls")
