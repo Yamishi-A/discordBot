@@ -40,21 +40,21 @@ MAX_WISHES_AT_ONCE = 10  # server-side clamp
 # =====================================================
 LOOT_TABLE = {
     3: [
-        "Rusted Seax",
-        "Padded Furs & Wood",
+        "Scrap-Metal Shiv/Club",
+        "Tire-Tread Armor",
         "10% XP Multiplier Token (1 Use)",
         "50 XP Crystal",
         "100 XP Crystal",
         "1,000 Crowns"
     ],
     4: [
-        "Huscarl Bearded Axe",
-        "Huscarl Lamellar",
+        "The Rider’s Weapon",
+        "The Rider’s Duster",
+        "Legion Standard",
+        "Legion Riot Plate",
         "10% XP Multiplier Token (1 Week)",
         "250 XP Crystal",
         "10,000 Crowns",
-        "The Einherjars Edge",
-        "The Einherjars Hauberk"
     ],
     5: [
         "Exalted Grade Item",
